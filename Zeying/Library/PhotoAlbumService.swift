@@ -62,6 +62,7 @@ enum PhotoAlbumServiceError: LocalizedError {
 @Observable
 final class PhotoAlbumService {
     private static let albumUseKey = "com.mars.zeying.albumSelectionCounts.v1"
+    private static let newlyCreatedAlbumKey = "com.mars.zeying.newlyCreatedAlbum.v1"
     private let photoLibrary = PHPhotoLibrary.shared()
     @ObservationIgnored private let defaults = UserDefaults.standard
     @ObservationIgnored private var selectionCounts: [String: Int] =
@@ -69,6 +70,8 @@ final class PhotoAlbumService {
     @ObservationIgnored private var membershipsByAsset: [String: [PhotoAlbumMembership]] = [:]
     @ObservationIgnored private var membershipGeneration = 0
     @ObservationIgnored private var membershipLibraryRevision: Int?
+    @ObservationIgnored private var newlyCreatedAlbumIdentifier: String? =
+        UserDefaults.standard.string(forKey: PhotoAlbumService.newlyCreatedAlbumKey)
 
     private(set) var albums: [PhotoAlbumOption] = []
     private(set) var frequentlyUsedFirst: [PhotoAlbumOption] = []
@@ -82,7 +85,11 @@ final class PhotoAlbumService {
 
     /// PhotoKit's membership query is synchronous. Run it away from the card's
     /// animation and cache the result until the library snapshot changes.
-    func loadMemberships(for assetIdentifier: String, libraryRevision: Int) async {
+    func loadMemberships(
+        for assetIdentifier: String,
+        libraryRevision: Int,
+        publishChange: Bool = true
+    ) async {
         if membershipLibraryRevision != libraryRevision {
             invalidateMemberships()
             membershipLibraryRevision = libraryRevision
@@ -111,7 +118,9 @@ final class PhotoAlbumService {
         }.value
         guard generation == membershipGeneration, !Task.isCancelled else { return }
         membershipsByAsset[assetIdentifier] = memberships
-        membershipRevision += 1
+        // The next card is prefetched in the background. Publishing that
+        // result while the current card is moving invalidates its whole view.
+        if publishChange { membershipRevision += 1 }
     }
 
     private func invalidateMemberships() {
@@ -122,6 +131,8 @@ final class PhotoAlbumService {
 
     private func orderByRecentUse() -> [PhotoAlbumOption] {
         albums.sorted { left, right in
+            if left.id == newlyCreatedAlbumIdentifier { return true }
+            if right.id == newlyCreatedAlbumIdentifier { return false }
             let leftCount = selectionCounts[left.id, default: 0]
             let rightCount = selectionCounts[right.id, default: 0]
             if leftCount != rightCount { return leftCount > rightCount }
@@ -132,6 +143,10 @@ final class PhotoAlbumService {
 
     func recordSelection(of albumIdentifier: String) {
         selectionCounts[albumIdentifier, default: 0] += 1
+        if newlyCreatedAlbumIdentifier != albumIdentifier {
+            newlyCreatedAlbumIdentifier = nil
+            defaults.removeObject(forKey: Self.newlyCreatedAlbumKey)
+        }
         defaults.set(selectionCounts, forKey: Self.albumUseKey)
         frequentlyUsedFirst = orderByRecentUse()
         revision += 1
@@ -177,6 +192,54 @@ final class PhotoAlbumService {
         }
         frequentlyUsedFirst = orderByRecentUse()
         revision += 1
+    }
+
+    /// Create a real Photos album before asking whether to add the current asset.
+    func createAlbumImmediately(title: String) async throws -> PhotoAlbumOption {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard Self.canRead(status) else {
+            throw PhotoAlbumServiceError.authorizationRequired(status)
+        }
+        let identifier = try await createAlbum(title: title)
+        newlyCreatedAlbumIdentifier = identifier
+        defaults.set(identifier, forKey: Self.newlyCreatedAlbumKey)
+        refresh()
+        if !albums.contains(where: { $0.id == identifier }) {
+            // PhotoKit can publish the collection a moment after the change
+            // callback. Retry once before reporting it unavailable.
+            try await Task.sleep(for: .milliseconds(150))
+            refresh()
+        }
+        guard let option = albums.first(where: { $0.id == identifier }) else {
+            throw AlbumOperationError.collectionUnavailable(title)
+        }
+        return option
+    }
+
+    /// Add one asset now, after the user confirms the new album destination.
+    func add(assetIdentifier: String, to albumIdentifier: String) async throws {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard Self.canRead(status) else {
+            throw PhotoAlbumServiceError.authorizationRequired(status)
+        }
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [assetIdentifier], options: nil
+        ).firstObject else {
+            throw AlbumOperationError.assetUnavailable
+        }
+        guard let collection = fetchCollection(with: albumIdentifier),
+              collection.assetCollectionType == .album,
+              collection.assetCollectionSubtype == .albumRegular,
+              collection.canPerform(.addContent) else {
+            throw AlbumOperationError.albumUnavailable
+        }
+        if Self.contains(asset, in: collection) { return }
+        try await add([asset], to: collection)
+        guard confirmedMembership(of: [asset], in: collection).contains(assetIdentifier) else {
+            throw AlbumOperationError.additionUnconfirmed
+        }
+        invalidateMemberships()
+        recordSelection(of: albumIdentifier)
     }
 
     /// Removes only this album membership. The asset remains in the library
@@ -455,6 +518,7 @@ final class PhotoAlbumService {
         case albumUnavailable
         case removalNotAllowed
         case removalUnconfirmed
+        case additionUnconfirmed
 
         var errorDescription: String? {
             switch self {
@@ -478,6 +542,8 @@ final class PhotoAlbumService {
                 String(localized: "系统不允许从这个相簿移除照片。")
             case .removalUnconfirmed:
                 String(localized: "尚未确认照片已从相簿移除，请在系统照片中检查。")
+            case .additionUnconfirmed:
+                String(localized: "尚未确认照片已加入相簿，请在系统照片中检查。")
             }
         }
     }

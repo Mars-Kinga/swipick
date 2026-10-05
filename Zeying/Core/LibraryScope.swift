@@ -37,6 +37,7 @@ enum LibraryScope: Hashable, Codable {
     case all
     case random
     case month(Date)
+    case year(Date)
     case album(String)
     case category(MediaCategory)
     case later

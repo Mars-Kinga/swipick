@@ -5,6 +5,25 @@ import Testing
 
 @MainActor
 struct ReviewStoreTests {
+    @Test("重新进入分类时可按实际处理顺序回看已整理照片")
+    func reviewedHistoryUsesDecisionOrder() throws {
+        let container = try ModelContainer(
+            for: ReviewRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let older = ReviewRecord(assetIdentifier: "history-older", decision: .keep)
+        older.updatedAt = Date(timeIntervalSince1970: 100)
+        let newer = ReviewRecord(assetIdentifier: "history-newer", decision: .delete)
+        newer.updatedAt = Date(timeIntervalSince1970: 200)
+        container.mainContext.insert(older)
+        container.mainContext.insert(newer)
+        try container.mainContext.save()
+
+        let store = ReviewStore(context: container.mainContext)
+        #expect(store.reviewedIdentifiers(among: ["history-newer", "history-unreviewed", "history-older"])
+            == ["history-older", "history-newer"])
+    }
+
     @Test("加入相簿待办模型后仍可读取旧审核记录")
     func expandedSchemaKeepsExistingReviewRecords() throws {
         let folderURL = FileManager.default.temporaryDirectory
@@ -159,6 +178,72 @@ struct ReviewStoreTests {
         #expect(store.decide(.keep, for: "photo-A"))
         let reopened = ReviewStore(context: container.mainContext)
         #expect(reopened.decision(for: "photo-A") == .keep)
+    }
+
+    @Test("连续审核保留即时决定，退出后再通知主页刷新")
+    func interactiveReviewDefersOnlyObservation() throws {
+        let container = try ModelContainer(
+            for: ReviewRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let suite = "com.mars.zeying.tests.interactiveReview.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ReviewStore(context: container.mainContext, defaults: defaults)
+        let initialRevision = store.revision
+
+        store.beginInteractiveReview()
+        #expect(store.decide(.delete, for: "photo-A"))
+        #expect(store.decide(.keep, for: "photo-B"))
+        #expect(store.revision == initialRevision)
+        #expect(store.decision(for: "photo-A") == .delete)
+        #expect(store.decision(for: "photo-B") == .keep)
+
+        store.endInteractiveReview()
+        #expect(store.revision == initialRevision + 1)
+        #expect(store.flushPendingReviewChanges())
+    }
+
+    @Test("连续审核未批量写入时，重启可从待写记录恢复决定与撤销")
+    func pendingReviewJournalRecoversBeforeBatchSave() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appending(path: "ZeyingReviewJournal-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let suite = "com.mars.zeying.tests.reviewJournal.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let schema = Schema([ReviewRecord.self])
+        let configuration = ModelConfiguration(
+            "ReviewJournalTest",
+            schema: schema,
+            url: folder.appending(path: "Model.store"),
+            cloudKitDatabase: .none
+        )
+
+        do {
+            let container = try ModelContainer(for: schema, configurations: configuration)
+            let store = ReviewStore(context: container.mainContext, defaults: defaults)
+            store.beginInteractiveReview()
+            #expect(store.decide(.keep, for: "photo-A"))
+            #expect(store.decide(.delete, for: "photo-B"))
+            #expect(store.undo())
+            #expect(store.decision(for: "photo-B") == nil)
+            // Simulate a process ending before the scheduled SwiftData batch.
+        }
+
+        let reopenedContainer = try ModelContainer(for: schema, configurations: configuration)
+        let persistedBeforeReplay = try ModelContext(reopenedContainer).fetch(FetchDescriptor<ReviewRecord>())
+        #expect(persistedBeforeReplay.isEmpty)
+        let reopened = ReviewStore(context: reopenedContainer.mainContext, defaults: defaults)
+        reopened.beginInteractiveReview()
+        #expect(reopened.decision(for: "photo-A") == .keep)
+        #expect(reopened.decision(for: "photo-B") == nil)
+        reopened.endInteractiveReview()
+        #expect(reopened.flushPendingReviewChanges())
+
+        let persistedAfterFlush = try ModelContext(reopenedContainer).fetch(FetchDescriptor<ReviewRecord>())
+        #expect(persistedAfterFlush.map(\.assetIdentifier) == ["photo-A"])
     }
 
     @Test("收藏即保留；改为待删时清除待收藏")

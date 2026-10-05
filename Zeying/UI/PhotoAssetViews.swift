@@ -48,6 +48,15 @@ struct AssetImageView: View {
             hasFullQualityImage = true
             return
         }
+        // Review prefetch now caches a final 1,500-point image. Re-requesting
+        // the same asset here used to replace the card's first frame and made
+        // every swipe visibly change from soft to sharp.
+        if usesReviewCache,
+           let prepared = initialPreview ?? library.cachedQuickPreview(for: asset) {
+            image = prepared
+            hasFullQualityImage = true
+            return
+        }
         let useQuickPreview = max(targetSize.width, targetSize.height) >= 900
         image = initialPreview ?? (useQuickPreview ? library.cachedQuickPreview(for: asset) : nil)
         if !allowNetwork, useQuickPreview, image == nil {

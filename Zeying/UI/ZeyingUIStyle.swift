@@ -153,6 +153,10 @@ extension View {
 }
 
 extension Date {
+    var zeyingYearTitle: String {
+        formatted(.dateTime.year().locale(zeyingDisplayLocale))
+    }
+
     var zeyingMonthTitle: String {
         formatted(.dateTime.year().month(.wide).locale(zeyingDisplayLocale))
     }

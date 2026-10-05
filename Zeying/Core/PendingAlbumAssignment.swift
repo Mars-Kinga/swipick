@@ -4,9 +4,9 @@ import SwiftData
 
 /// A local, reversible instruction to add an asset to a user album.
 ///
-/// The assignment is deliberately separate from `ReviewRecord`: choosing an
-/// album is a keep decision, but the Photos library is not changed until the
-/// user confirms the album section in the final checklist.
+/// Existing-album choices are staged until the final checklist. New albums
+/// created from the review screen are written directly through PhotoKit and
+/// do not use this model. Older staged new-album records remain supported.
 @Model
 final class PendingAlbumAssignment {
     @Attribute(.unique) var assetIdentifier: String
@@ -39,7 +39,7 @@ final class PendingAlbumAssignmentStore {
     // ModelContext does not retain its container. Keep it alive for the
     // lifetime of this store so writes remain valid after app launch.
     @ObservationIgnored private let modelContainer: ModelContainer
-    @ObservationIgnored private var context: ModelContext { modelContainer.mainContext }
+    @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private var assignmentsByAsset: [String: PendingAlbumAssignment] = [:]
 
     private(set) var revision = 0
@@ -47,6 +47,7 @@ final class PendingAlbumAssignmentStore {
 
     init(context: ModelContext) {
         modelContainer = context.container
+        self.context = context
         reload()
     }
 

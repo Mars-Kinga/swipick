@@ -17,7 +17,9 @@ struct LibraryHomeView: View {
     @State private var isRequestingAccess = false
     @State private var isRefreshing = false
     @State private var showingAllMonths = false
+    @State private var showingAllYears = false
     @State private var showingAllAlbums = false
+    @State private var timeGrouping: TimeGrouping = .month
 
     private var isAuthorized: Bool {
         switch library.authorizationStatus {
@@ -91,6 +93,22 @@ struct LibraryHomeView: View {
             return Array(monthBuckets.prefix(6))
         }
         return monthBuckets
+    }
+
+    private var yearBuckets: [MonthBucket] {
+        let calendar = Calendar.current
+        var grouped: [Date: [PHAsset]] = [:]
+        for asset in library.assets {
+            guard let date = asset.creationDate,
+                  let year = calendar.date(from: calendar.dateComponents([.year], from: date)) else { continue }
+            grouped[year, default: []].append(asset)
+        }
+        return grouped.map { MonthBucket(date: $0.key, assets: $0.value) }
+            .sorted { $0.date > $1.date }
+    }
+
+    private var visibleYearBuckets: [MonthBucket] {
+        showingAllYears ? yearBuckets : Array(yearBuckets.prefix(6))
     }
 
     private var visibleAlbums: [LibraryAlbum] {
@@ -171,6 +189,7 @@ struct LibraryHomeView: View {
         case .all: String(localized: "全部照片")
         case .random: String(localized: "随机清理")
         case .month(let date): date.zeyingMonthTitle
+        case .year(let date): date.zeyingYearTitle
         case .album(let identifier):
             library.albums.first(where: { $0.id == identifier })?.title ?? String(localized: "相簿")
         case .category(let category): category.title
@@ -504,45 +523,73 @@ struct LibraryHomeView: View {
     private var monthSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .lastTextBaseline) {
-                Text(String(localized: "按月份"))
-                    .font(.title3.weight(.semibold))
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Button {
+                        timeGrouping = .month
+                    } label: {
+                        Text(String(localized: "按月份"))
+                            .foregroundStyle(timeGrouping == .month ? .primary : .secondary)
+                    }
+                    .buttonStyle(.plain)
+
+                    Text("|")
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+
+                    Button {
+                        timeGrouping = .year
+                    } label: {
+                        Text(String(localized: "按年份"))
+                            .foregroundStyle(timeGrouping == .year ? .primary : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .font(.title3.weight(.semibold))
                 Spacer()
-                if monthBuckets.count > 6 {
-                    Button(showingAllMonths ? String(localized: "收起") : String(localized: "展开全部")) {
+                let hasMore = timeGrouping == .month ? monthBuckets.count > 6 : yearBuckets.count > 6
+                if hasMore {
+                    Button((timeGrouping == .month ? showingAllMonths : showingAllYears) ? String(localized: "收起") : String(localized: "展开全部")) {
                         if reduceMotion {
-                            showingAllMonths.toggle()
+                            toggleTimeExpansion()
                         } else {
                             withAnimation(.snappy(duration: 0.24)) {
-                                showingAllMonths.toggle()
+                                toggleTimeExpansion()
                             }
                         }
                     }
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .accessibilityLabel(showingAllMonths ? String(localized: "收起月份") : String(localized: "展开全部月份"))
+                    .accessibilityLabel(String(localized: "展开或收起时间列表"))
                 } else {
-                    Text(String(localized: "最近 6 个月"))
+                    Text(timeGrouping == .month ? String(localized: "最近 6 个月") : String(localized: "最近 6 年"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if monthBuckets.isEmpty {
+            if (timeGrouping == .month ? monthBuckets : yearBuckets).isEmpty {
                 Text(String(localized: "还没有可访问的照片"))
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 10)
             } else {
                 LazyVStack(spacing: 8) {
-                    ForEach(visibleMonthBuckets) { bucket in
-                        NavigationLink(value: HomeDestination.scope(.month(bucket.date))) {
-                            MonthRow(bucket: bucket, reviews: reviews)
+                    ForEach(timeGrouping == .month ? visibleMonthBuckets : visibleYearBuckets) { bucket in
+                        NavigationLink(value: HomeDestination.scope(timeGrouping == .month ? .month(bucket.date) : .year(bucket.date))) {
+                            MonthRow(bucket: bucket, reviews: reviews, grouping: timeGrouping)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(String(localized: "打开 \(bucket.date.zeyingMonthTitle)"))
+                        .accessibilityLabel(timeGrouping == .month
+                            ? String(localized: "打开 \(bucket.date.zeyingMonthTitle)")
+                            : String(localized: "打开 \(bucket.date.zeyingYearTitle)"))
                     }
                 }
             }
         }
+    }
+
+    private func toggleTimeExpansion() {
+        if timeGrouping == .month { showingAllMonths.toggle() }
+        else { showingAllYears.toggle() }
     }
 
     private var albumSection: some View {
@@ -707,6 +754,11 @@ private enum HomeDestination: Hashable {
     case scope(LibraryScope)
 }
 
+private enum TimeGrouping: Hashable {
+    case month
+    case year
+}
+
 private struct MonthBucket: Identifiable {
     let date: Date
     let assets: [PHAsset]
@@ -759,24 +811,17 @@ private enum RandomCleanupAccent {
 }
 
 private struct CleanupTotalsCardButtonStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     func makeBody(configuration: Configuration) -> some View {
-        let isPressed = configuration.isPressed
         let outline = RoundedRectangle(cornerRadius: 22, style: .continuous)
 
         return configuration.label
             .zeyingGlass(in: outline)
             .overlay {
                 outline
-                    .strokeBorder(RandomCleanupAccent.borderGradient, lineWidth: isPressed ? 2.5 : 1.5)
-                    .shadow(color: RandomCleanupAccent.blue.opacity(isPressed ? 0.55 : 0), radius: isPressed ? 10 : 0)
-                    .shadow(color: RandomCleanupAccent.purple.opacity(isPressed ? 0.4 : 0), radius: isPressed ? 14 : 0)
+                    .strokeBorder(RandomCleanupAccent.borderGradient, lineWidth: 1.6)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
-            .scaleEffect(reduceMotion ? 1 : (isPressed ? 0.985 : 1))
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isPressed)
     }
 }
 
@@ -826,6 +871,7 @@ private struct CleanupTotalItem: View {
 private struct MonthRow: View {
     let bucket: MonthBucket
     let reviews: ReviewStore
+    let grouping: TimeGrouping
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -836,7 +882,7 @@ private struct MonthRow: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(bucket.date.zeyingMonthTitle)
+                Text(grouping == .month ? bucket.date.zeyingMonthTitle : bucket.date.zeyingYearTitle)
                     .font(.subheadline.weight(.semibold))
                 Text(String(localized: "\(bucket.assets.count) 张照片"))
                     .font(.caption)

@@ -32,6 +32,11 @@ final class ReviewResumeStore {
             from: Calendar.current.dateComponents([.year, .month], from: month)
            ) {
             normalizedScope = .month(normalizedMonth)
+        } else if case .year(let year) = scope,
+                  let normalizedYear = Calendar.current.date(
+                    from: Calendar.current.dateComponents([.year], from: year)
+                  ) {
+            normalizedScope = .year(normalizedYear)
         } else {
             normalizedScope = scope
         }

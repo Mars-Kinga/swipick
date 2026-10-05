@@ -8,6 +8,8 @@ struct RootView: View {
     let albumService: PhotoAlbumService
     let albumAssignments: PendingAlbumAssignmentStore
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var selectedTab: RootTab = .home
     @State private var homePath = NavigationPath()
     @State private var settings = AppSettings()
@@ -46,6 +48,11 @@ struct RootView: View {
             homePath = NavigationPath()
             selectedTab = .summary
         })
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                _ = reviews.flushPendingReviewChanges()
+            }
+        }
         .tint(.primary)
     }
 

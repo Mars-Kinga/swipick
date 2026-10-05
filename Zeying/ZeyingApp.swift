@@ -43,7 +43,7 @@ private final class AppState {
             let container = try ModelContainer(for: ReviewRecord.self, PendingAlbumAssignment.self)
             modelContainer = container
             reviews = ReviewStore(context: container.mainContext)
-            albumAssignments = PendingAlbumAssignmentStore(context: container.mainContext)
+            albumAssignments = PendingAlbumAssignmentStore(context: ModelContext(container))
             startupError = nil
         } catch {
             modelContainer = nil

@@ -224,7 +224,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Swipick;
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Swipick needs access to your photos so you can review them one by one and, after confirmation, add them to albums, favorite them, convert Live Photos, or delete them.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UILaunchStoryboardName = SwipickLaunchScreen;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mars.zeying;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -246,7 +246,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Swipick;
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Swipick needs access to your photos so you can review them one by one and, after confirmation, add them to albums, favorite them, convert Live Photos, or delete them.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UILaunchStoryboardName = SwipickLaunchScreen;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mars.zeying;
 				PRODUCT_NAME = "$(TARGET_NAME)";

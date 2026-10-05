@@ -15,9 +15,9 @@ struct FirstUseGuideView: View {
             intro: String(localized: "选完自动进入下一张；左右两侧也可以点按。"),
             tips: [
                 GuideTip(symbol: "arrow.left", title: String(localized: "左滑 · 待删除"),
-                         detail: String(localized: "默认先放进清单，不会立即从系统照片删除。")),
+                         detail: String(localized: "左滑或点照片左侧，可将照片放进待删除清单；确认前不会从系统照片删除。")),
                 GuideTip(symbol: "arrow.right", title: String(localized: "右滑 · 保留"),
-                         detail: String(localized: "留下当前照片或视频，继续下一张。")),
+                         detail: String(localized: "右滑或点照片右侧，可保留当前照片或视频并进入下一张。")),
                 GuideTip(symbol: "arrow.down", title: String(localized: "下滑 · 待决定"),
                          detail: String(localized: "明显向下滑并松手才生效；短滑或斜滑会回弹。"))
             ]
@@ -29,13 +29,13 @@ struct FirstUseGuideView: View {
             intro: String(localized: "首页先选一组，随时回来继续。"),
             tips: [
                 GuideTip(symbol: "calendar", title: String(localized: "月份、类型、相簿"),
-                         detail: String(localized: "选一个入口，只看这组尚未处理的照片和视频。")),
+                         detail: String(localized: "可按月、按年、类型或相簿进入；已处理照片也能往回查看。")),
                 GuideTip(symbol: "arrow.right.circle", title: String(localized: "继续清理"),
                          detail: String(localized: "若上次那组还有未处理内容，会从那里继续。")),
                 GuideTip(symbol: "shuffle", title: String(localized: "随机清理"),
                          detail: String(localized: "首页可随机开始；审核页返回键旁可打乱本组剩余顺序。")),
                 GuideTip(symbol: "rectangle.stack.badge.plus", title: String(localized: "相簿整理"),
-                         detail: String(localized: "照片上方显示相簿胶囊；勾号表示已加入，点它可从该相簿移除，照片仍留在图库。"))
+                         detail: String(localized: "照片上方可选相簿；待加入的相簿再点一次可取消。勾号表示已加入系统相簿，点它可移除，照片仍留在图库。"))
             ]
         ),
         GuideStep(
@@ -46,10 +46,8 @@ struct FirstUseGuideView: View {
             tips: [
                 GuideTip(symbol: "plus.magnifyingglass", title: String(localized: "放大照片"),
                          detail: String(localized: "双指放大，放大后拖动查看细节。")),
-                GuideTip(symbol: "livephoto", title: String(localized: "播放 Live Photo"),
-                         detail: String(localized: "看到右上角 Live 图标时，长按照片 0.9 秒播放。")),
                 GuideTip(symbol: "livephoto.slash", title: String(localized: "转为静态照片"),
-                         detail: String(localized: "点右上角带斜杠的 Live 图标，再点“转为静态照片”；副本核对后由 iOS 确认删除原件。")),
+                         detail: String(localized: "点右上角带斜杠的 Live 图标创建静态照片。原拍摄时间不变，但“最近添加”会按新加入时间排序，位置可能与原照片不同。随后由 iOS 确认是否删除原件。")),
                 GuideTip(symbol: "speaker.slash", title: String(localized: "视频声音"),
                          detail: String(localized: "视频默认静音；点扬声器后，本次审核的视频会沿用声音设置。")),
                 GuideTip(symbol: "info.circle", title: String(localized: "详情与分享"),
@@ -67,7 +65,7 @@ struct FirstUseGuideView: View {
                 GuideTip(symbol: "arrow.uturn.backward", title: String(localized: "不想删了"),
                          detail: String(localized: "点单张“恢复”或“恢复全部”，照片就会改为保留。")),
                 GuideTip(symbol: "star", title: String(localized: "收藏与相簿"),
-                         detail: String(localized: "这两类也要各自确认，之后才同步到系统照片。")),
+                         detail: String(localized: "收藏和已有相簿的整理会先暂存，再到清单分别确认。")),
                 GuideTip(symbol: "checkmark.shield", title: String(localized: "系统还会确认"),
                          detail: String(localized: "在清单批量提交删除时，iOS 会再次显示系统确认。"))
             ]

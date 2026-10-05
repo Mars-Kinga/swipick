@@ -17,18 +17,6 @@
                             <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFill" image="LaunchGradient" translatesAutoresizingMaskIntoConstraints="NO" id="launch-gradient">
                                 <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
                             </imageView>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="Swipick" textAlignment="center" lineBreakMode="tailTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="launch-title">
-                                <rect key="frame" x="127" y="383" width="139" height="46"/>
-                                <fontDescription key="fontDescription" type="system" weight="bold" pointSize="38"/>
-                                <color key="textColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
-                                <nil key="highlightedColor"/>
-                            </label>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="Preparing your library" textAlignment="center" lineBreakMode="tailTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="launch-subtitle">
-                                <rect key="frame" x="90" y="439" width="213" height="26"/>
-                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
-                                <color key="textColor" white="1" alpha="0.78" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
-                                <nil key="highlightedColor"/>
-                            </label>
                         </subviews>
                         <color key="backgroundColor" white="0.063" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
                         <constraints>
@@ -36,10 +24,6 @@
                             <constraint firstItem="launch-gradient" firstAttribute="trailing" secondItem="launch-root" secondAttribute="trailing" id="gradient-trailing"/>
                             <constraint firstItem="launch-gradient" firstAttribute="top" secondItem="launch-root" secondAttribute="top" id="gradient-top"/>
                             <constraint firstItem="launch-gradient" firstAttribute="bottom" secondItem="launch-root" secondAttribute="bottom" id="gradient-bottom"/>
-                            <constraint firstItem="launch-title" firstAttribute="centerX" secondItem="launch-root" secondAttribute="centerX" id="title-center-x"/>
-                            <constraint firstItem="launch-title" firstAttribute="centerY" secondItem="launch-root" secondAttribute="centerY" constant="-50" id="title-center-y"/>
-                            <constraint firstItem="launch-subtitle" firstAttribute="top" secondItem="launch-title" secondAttribute="bottom" constant="10" id="subtitle-top"/>
-                            <constraint firstItem="launch-subtitle" firstAttribute="centerX" secondItem="launch-root" secondAttribute="centerX" id="subtitle-center-x"/>
                         </constraints>
                     </view>
                 </viewController>
