@@ -897,7 +897,7 @@ private struct AlbumCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .background(
-            colorScheme == .dark ? Color.white.opacity(0.055) : Color(uiColor: .secondarySystemGroupedBackground),
+            colorScheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.065),
             in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
     }
@@ -933,7 +933,7 @@ private struct CategoryCard: View {
         .padding(14)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .background(
-            colorScheme == .dark ? Color.white.opacity(0.055) : Color(uiColor: .secondarySystemGroupedBackground),
+            colorScheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.065),
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
     }
