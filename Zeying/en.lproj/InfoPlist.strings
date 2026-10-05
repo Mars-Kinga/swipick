@@ -1,0 +1,3 @@
+"CFBundleDisplayName" = "Swipick";
+"CFBundleName" = "Swipick";
+"NSPhotoLibraryUsageDescription" = "Swipick needs access to your photos so you can review them one by one and, after confirmation, add them to albums, favorite them, convert Live Photos, or delete them.";

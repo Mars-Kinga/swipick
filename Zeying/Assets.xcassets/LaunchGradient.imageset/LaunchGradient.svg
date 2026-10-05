@@ -1,0 +1,33 @@
+<svg width="1170" height="2532" viewBox="0 0 1170 2532" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="base" x1="76" y1="0" x2="1134" y2="2532" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101C3B"/>
+      <stop offset="0.48" stop-color="#252044"/>
+      <stop offset="1" stop-color="#441D3F"/>
+    </linearGradient>
+    <radialGradient id="blueGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(18 232) rotate(41.7) scale(770 1010)">
+      <stop stop-color="#4DCCF2" stop-opacity="0.78"/>
+      <stop offset="0.42" stop-color="#3F7BD3" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#3F7BD3" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="coralGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1134 1960) rotate(-140) scale(850 1010)">
+      <stop stop-color="#FF806A" stop-opacity="0.72"/>
+      <stop offset="0.48" stop-color="#E85C99" stop-opacity="0.27"/>
+      <stop offset="1" stop-color="#E85C99" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="violetGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(740 720) rotate(126) scale(650 830)">
+      <stop stop-color="#A98FFF" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#A98FFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sheen" x1="190" y1="260" x2="950" y2="2210" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="0.46" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.04"/>
+    </linearGradient>
+  </defs>
+  <rect width="1170" height="2532" fill="url(#base)"/>
+  <rect width="1170" height="2532" fill="url(#blueGlow)"/>
+  <rect width="1170" height="2532" fill="url(#coralGlow)"/>
+  <rect width="1170" height="2532" fill="url(#violetGlow)"/>
+  <rect width="1170" height="2532" fill="url(#sheen)"/>
+</svg>
