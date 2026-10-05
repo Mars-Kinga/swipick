@@ -1,45 +1,59 @@
-# 择影
+<p align="center">
+  <img src="Zeying/Assets.xcassets/AppIcon.appiconset/AppIcon.png" width="112" alt="择影 App 图标">
+</p>
 
-一款仅在 iPhone 本机保存清理进度的照片整理 App。左划或点照片左侧选择删除；右划或点右侧保留；“待决定”单独存放。默认情况下，收藏和删除都在清单页分别确认后才写入系统照片图库。
+# Swipick · 择影
 
-## 开发与运行
+**一次一张，让整理照片成为简单的选择。**
 
-1. 用 Xcode 打开 `Zeying.xcodeproj`。
-2. 选择 `Zeying` scheme 与 iPhone 模拟器或设备。安装到个人设备时，在 Signing & Capabilities 中选择自己的开发团队，并按需修改 Bundle Identifier。
-3. 运行后允许照片访问。选择“限定访问”时，App 只会显示获准访问的项目，可在 App 内通过系统选择器增加照片。
+Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，把保留、待删和待决定分开，最后集中确认对系统图库的修改。项目使用 SwiftUI 构建原生界面，结合 Liquid Glass、叠放卡片和触觉反馈，探索照片整理中的效率与操作可控性。
 
-最低系统版本为 iOS 26。当前工程已用 Xcode 26.6 完成模拟器与连接的 iPhone 17 Pro Max 设备构建；iOS 27 的实际交互仍需在设备上运行检查。
+**Swift · SwiftUI · PhotoKit · SwiftData · iOS 26+**
 
-## 使用说明
+[English overview](#english-overview) · [完整使用指南](docs/USER_GUIDE.zh-CN.md)
 
-- 清理决定、待收藏和待删列表保存在设备上的 SwiftData 数据库中；卸载 App 会移除这些本地进度。
-- 首次读取获准访问的图库时显示全屏渐变开屏画面；读取完成后自动进入首页。尚未授权时会直接显示权限入口。
-- 首次打开会显示可跳过的使用指南，说明左右滑动、待决定、相簿胶囊和清单确认；之后可从“设置”再次查看。
-- 审核页的删除、撤销、待决定、收藏、保留按钮位于同一排；保留使用蓝色。卡片上方左侧是横向相簿胶囊，末端内容裁切在圆角边界内；右侧只显示文件大小，照片信息在右上角。按月份审核时，顶部标题显示当前照片的完整拍摄日期。审核中的照片以叠放卡片呈现，横向照片按自身比例显示，不填充高大的留白卡片；划动时下一张随手势显露，删除和保留提示逐渐变清晰。照片和视频卡片都可左右划动；视频底部的原生播放控制区保留给播放操作。卡片和周围区域也可点按左右两侧作决定；按钮按下和成功操作会提供视觉反馈。下一张照片会提前准备本地预览，轻点切换时不显示转圈提示。系统照片里已收藏的照片会显示实心星标。
-- 视频预览会自动播放且每次进入审核页时默认静音；点按视频上的扬声器按钮开启声音后，本次审核的后续视频也保持有声，直到再次点按静音或退出审核页。可用设备音量按钮调整音量。
-- 审核页返回键旁的随机按钮只打乱当前月份、类型或相簿里尚未处理的照片和视频；已处理部分与撤销记录保持原位。随机后“继续清理”仍回到原分类。
-- 实况照片从预览开始就在右上角显示实况标识；长按 0.6 秒才开始载入动态内容，轻点切换不显示载入转圈。松手停止播放，但已开始的载入会继续完成并留在当前卡片，方便再次长按立即播放。轻点仍用于保留或待删。照片双指放大后可拖动画面。
-- “继续清理”会回到上次使用的月份、类别、相簿或随机清理入口，从其中尚未处理的照片接着开始；全部处理完后隐藏。首页统计行最左侧的彩色“随机清理”会打乱所有未处理照片的顺序。
-- 首页统计行显示当前可访问及已处理数量；月份默认显示最近 6 个，使用更紧凑的非玻璃条目；个人相簿默认显示前 8 个，其他内容可展开。“类型”显示有内容的照片、视频等入口和 PhotoKit 返回的媒体智能相簿类型。
-- 首页“择影已清理”沿用玻璃卡片，紧接顶部统计胶囊，展示已清理照片、Live 转静态和已知资源大小；边缘使用与“随机清理”一致的静态蓝紫渐变，按下时短暂发光，点按可打开包含视频数量的完整清理统计。
-- 审核页右上角的系统分享按钮可分享当前照片或视频；准备 iCloud 原片时可能需要等待下载。照片仍可直接双指放大。
-- 实况照片审核页右上角有“转为静态照片”：先用 PhotoKit 导出当前显示的静态画面，复制原拍摄时间与可写个人相簿，并自动核对副本。副本就绪后直接显示删除原件的系统确认；转换中断会自动尝试恢复，失败会保留原件。此操作需要完整照片访问权限，iCloud 原片可能先下载。静态副本不会继承动态片段或照片的编辑历史。
-- 审核页左侧长条固定显示“相簿整理”，其后可左右滑动查看个人相簿。已加入的相簿会排在前面并显示勾号；点按勾号并确认后，只会从该相簿移除照片。其余相簿按常用程度排序，点选会视为保留，并先保存在本机；待加入状态显示时钟，清单中“待整理相簿”需再次确认才写入系统照片。每张照片暂存一个目标相簿，重新选择会替换先前目标。有限权限下只能整理获准访问的照片。
-- 新建相簿分为系统创建和加入照片两步；如果 App 恰好在两步之间退出，清单会保留待办，并在检测到新出现的同名相簿时提示手动选择它，避免自动创建重复相簿。
-- 底部“设置”可关闭审核操作的触觉反馈，也可查看照片权限、清理统计和版本。
-- 左划或点删除会把照片列入待删清单；在清单确认后，照片才会提交到系统图库，iOS 还会显示系统删除确认。一次批量提交可减少系统弹窗。删除会作用于整个图库，而非仅从当前相簿移除；iCloud 照片的删除也可能同步到其他设备。
-- 未收藏照片的星标按钮先把照片视为保留并列入待收藏；清单页单独确认后才同步系统收藏。已经收藏的照片显示实心星标，点按“取消收藏”并确认后会移除系统收藏标记，照片仍留在图库。
-- 最终清单显示待收藏、待删除、待整理相簿、未完成的静态转换及相关不可访问记录，不列出已保留照片；首页有待办时会提示前往清单查看并确认。
-- 清单的待收藏、待删除标题右侧分别提供原生蓝色“收藏”和“删除”按钮，点按后仍会弹出各自的确认对话框。
-- 本地照片会在预览时自动读取文件大小，读取过程不会下载 iCloud 原片；iCloud 原片或大视频大小未知时，可主动点按获取，这可能下载原片并消耗流量。
-- 首页累计显示经择影确认删除的照片与视频数量，以及删除前已知的资源大小。该字节数不等于马上释放的设备空间；系统“最近删除”和 iCloud 同步仍会影响实际可用空间。
-- 已读取的文件大小按照片修改时间缓存；视频预览和文件大小获取彼此独立。
-- 若照片被外部删除或暂时超出限定访问范围，清单会显示不可访问的本地记录；完整权限下可明确确认，只清理这些本地记录。
-- 首版不包含系统“人物与宠物”分类。公开 PhotoKit API 没有提供读取该分组的接口。
+## 从选择到确认
 
-## 命令行构建
+1. **选择范围**：按月份、媒体类型或个人相簿开始，也可以随机审核未处理项目。
+2. **逐张决定**：左划待删、右划保留；点按左右区域同样有效。暂时拿不定主意时放入“待决定”，误操作可以撤销。
+3. **集中确认**：在清单中分别确认删除、收藏和相簿整理，再通过系统权限与确认流程写入照片图库。
 
-若 `xcode-select` 指向 Command Line Tools，可在命令前指定 Xcode：
+清理进度保存在本机，下次打开可以从上次的分类继续。
+
+## 功能与交互
+
+| 场景 | 实现 |
+| --- | --- |
+| 快速审核 | 叠放卡片、手势反馈、点按操作、撤销、待决定和随机排序 |
+| 查看媒体 | 照片缩放、视频播放与静音、长按播放 Live Photo、系统分享 |
+| 辅助判断 | 拍摄日期、照片信息、文件大小与已有收藏状态 |
+| 整理图库 | 暂存收藏与目标相簿，清单确认后提交；支持新建相簿 |
+| Live Photo 转静态 | 创建并核对静态副本，保留拍摄时间与可写个人相簿，再确认删除原件 |
+| 持续清理 | 本地进度、继续审核入口、照片和视频删除统计、转换统计 |
+| 首次使用 | 照片权限入口、可跳过的使用指南、中英文资源与触觉设置 |
+
+## 技术实现
+
+- **界面与媒体服务分层**：`UI` 负责展示与交互，`Library` 封装 PhotoKit 和媒体操作，`Core` 管理审核记录与本地状态。
+- **决定与图库写入分离**：SwiftData 保存审核决定和待办，用户确认后才提交对应的系统操作。
+- **预览按需加载**：提前准备下一张本地预览；Live Photo 动态内容在长按时加载，视频预览与文件大小获取独立处理。
+- **转换与中断恢复**：Live Photo 转换记录持久化，核对副本后才进入原件删除流程；转换中断后尝试恢复。
+- **文件大小缓存**：按照片修改时间缓存已读取的大小，自动读取本地资源时不主动下载 iCloud 原片。
+- **行为测试**：使用 Swift Testing 覆盖审核持久化、撤销、收藏与删除互斥、相簿待办、继续审核状态、设置和滑动判定等逻辑。
+
+## 本地运行
+
+需要支持 iOS 26 SDK 的 Xcode；工程最低部署版本为 **iOS 26.0**。源码中的工程、scheme 和 App target 仍名为 `Zeying`。
+
+```sh
+git clone https://github.com/Mars-Kinga/swipick.git
+cd swipick
+open Zeying.xcodeproj
+```
+
+选择 `Zeying` scheme 和 iPhone 模拟器或设备运行。安装到自己的 iPhone 时，在 **Signing & Capabilities** 中选择开发团队，并按需修改 Bundle Identifier。启动后授予照片访问权限；限定访问下只展示获准访问的资源。
+
+命令行构建：
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
@@ -48,4 +62,34 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   -derivedDataPath /tmp/ZeyingDerived CODE_SIGNING_ALLOWED=NO build
 ```
 
-自动测试在 Xcode scheme 的 Test 动作中运行。PhotoKit 授权、iCloud 下载、系统收藏、相簿写入、实况照片转换与系统删除确认仍需在设备或可用的 iOS 模拟器上手动验收。
+在 Xcode 中使用 **Product → Test** 运行测试。照片授权、iCloud 下载、图库写入和系统确认仍需在设备或适用的模拟器环境手动验收。
+
+## 项目结构
+
+```text
+Zeying/
+├── Core/          审核记录、待办、设置与继续审核状态
+├── Library/       图库访问、相簿、文件大小与 Live Photo 转换
+├── UI/            首页、审核卡片、清单、设置与媒体预览
+├── Assets.xcassets/
+├── en.lproj/
+└── zh-Hans.lproj/
+ZeyingTests/        Swift Testing 行为测试
+Tools/             图标生成工具
+```
+
+## 数据与当前边界
+
+审核进度保存在设备本机；卸载 App 会移除这些进度。iCloud 原片由系统照片服务提供，主动获取原片、分享或转换可能触发下载。
+
+删除会作用于系统图库，并可能通过 iCloud 同步到其他设备。统计中的已知资源大小不代表立即释放的设备空间，仍受“最近删除”和同步状态影响。Live Photo 转静态需要完整照片权限，副本不保留动态片段或编辑历史。目前不提供系统“人物与宠物”分组入口。
+
+本仓库展示项目源码，运行与安装方式见上文；详细操作行为见[使用指南](docs/USER_GUIDE.zh-CN.md)。
+
+## English overview
+
+**Swipick** is a personal native iOS project for reviewing photos and videos one at a time. Swipe left to queue deletion, swipe right to keep, or defer a decision for later. Review choices stay on the device; queued deletions, favorites and album assignments are confirmed before being written to the system photo library.
+
+Built with **SwiftUI, PhotoKit and SwiftData**, the app includes month and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included.
+
+To run it, open `Zeying.xcodeproj` in an Xcode version supporting the iOS 26 SDK, select the `Zeying` scheme, and choose a simulator or your iPhone. Device installation requires configuring your development team and bundle identifier. The minimum deployment target is **iOS 26.0**. Run the included Swift Testing tests through **Product → Test** in Xcode.
