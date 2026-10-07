@@ -43,6 +43,33 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle(isOn: $settings.sideTapDecisionsEnabled) {
+                        Label(String(localized: "侧边点按做决定"), systemImage: "hand.tap")
+                    }
+                } footer: {
+                    Text(String(localized: "开启后，点审核区域左半边加入待删除，点右半边保留；照片周围空白也能点按或滑动。"))
+                }
+
+                Section {
+                    Toggle(isOn: $settings.protectFavoritesEnabled) {
+                        Label(String(localized: "保护收藏照片"), systemImage: "checkmark.shield")
+                    }
+                } footer: {
+                    Text(String(localized: "已收藏或待收藏的照片加入待删除前，再次确认。"))
+                }
+
+                Section {
+                    Toggle(isOn: $settings.iCloudAutoDownloadEnabled) {
+                        Label(String(localized: "自动下载 iCloud 原片"), systemImage: "icloud.and.arrow.down")
+                    }
+                    .accessibilityHint(String(localized: "开启后，浏览照片时允许从 iCloud 下载高清内容"))
+                } header: {
+                    Text("iCloud")
+                } footer: {
+                    Text(String(localized: "默认关闭：仅存于 iCloud 的照片在审核时显示等待提示。开启后，打开当前照片才下载高清内容；不会预下载后续照片。"))
+                }
+
+                Section {
                     LabeledContent {
                         Text(authorizationTitle)
                             .foregroundStyle(authorizationTint)

@@ -14,11 +14,13 @@ struct AssetImageView: View {
     var allowNetwork = false
     var targetSize = CGSize(width: 480, height: 480)
     var initialPreview: UIImage?
+    var requiresFullQuality = false
 
     @State private var image: UIImage?
     @State private var activeRequestIdentifier: String?
     @State private var requestGeneration = UUID()
     @State private var hasFullQualityImage = false
+    @State private var didFinishPreviewRequest = false
 
     var body: some View {
         Group {
@@ -26,12 +28,42 @@ struct AssetImageView: View {
                 Image(uiImage: displayedImage)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
+            } else if didFinishPreviewRequest {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo.slash")
+                        .font(.title3)
+                    if max(targetSize.width, targetSize.height) >= 900 {
+                        Text(allowNetwork ? String(localized: "照片暂时无法加载") : String(localized: "暂无本地预览"))
+                            .font(.caption.weight(.medium))
+                        Text(String(localized: "仍可继续作出决定"))
+                            .font(.caption2)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .padding(16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.secondary.opacity(0.12))
             } else {
                 Rectangle()
                     .fill(.secondary.opacity(0.12))
             }
         }
-        .task(id: asset.localIdentifier) { await loadImage() }
+        .overlay(alignment: .bottomLeading) {
+            if allowNetwork, !didFinishPreviewRequest, max(targetSize.width, targetSize.height) >= 900 {
+                ProgressView(String(localized: "正在加载高清照片…"))
+                    .font(.caption)
+                    .tint(.white)
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .padding(12)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task(id: ImageRequestIdentity(assetID: asset.localIdentifier, allowNetwork: allowNetwork, targetSize: targetSize, requiresFullQuality: requiresFullQuality)) {
+            await loadImage()
+        }
         .accessibilityLabel(String(localized: "照片预览"))
     }
 
@@ -42,30 +74,51 @@ struct AssetImageView: View {
         requestGeneration = generation
         activeRequestIdentifier = requestIdentifier
         hasFullQualityImage = false
-        let usesReviewCache = allowNetwork && targetSize == CGSize(width: 1_500, height: 1_500)
+        didFinishPreviewRequest = false
+        let usesReviewCache = requiresFullQuality && targetSize == CGSize(width: 1_500, height: 1_500)
         if usesReviewCache, let cached = library.cachedReviewPreview(for: asset) {
             image = cached
             hasFullQualityImage = true
+            didFinishPreviewRequest = true
             return
         }
-        // Review prefetch now caches a final 1,500-point image. Re-requesting
-        // the same asset here used to replace the card's first frame and made
-        // every swipe visibly change from soft to sharp.
-        if usesReviewCache,
-           let prepared = initialPreview ?? library.cachedQuickPreview(for: asset) {
-            image = prepared
-            hasFullQualityImage = true
+        if requiresFullQuality {
+            image = nil
+            let requestedImage: UIImage?
+            if usesReviewCache {
+                requestedImage = await library.prepareReviewPreview(for: asset, allowNetwork: allowNetwork)
+            } else {
+                requestedImage = await library.requestImage(
+                    for: asset,
+                    targetSize: targetSize,
+                    allowNetwork: allowNetwork,
+                    contentMode: contentMode == .fill ? .aspectFill : .aspectFit,
+                    deliveryMode: .highQualityFormat
+                )
+            }
+            guard !Task.isCancelled, activeRequestIdentifier == requestIdentifier,
+                  requestGeneration == generation else { return }
+            image = requestedImage
+            hasFullQualityImage = requestedImage != nil
+            didFinishPreviewRequest = true
             return
         }
         let useQuickPreview = max(targetSize.width, targetSize.height) >= 900
         image = initialPreview ?? (useQuickPreview ? library.cachedQuickPreview(for: asset) : nil)
-        if !allowNetwork, useQuickPreview, image == nil {
+        if useQuickPreview, image == nil {
             let quickImage = await library.quickPreview(for: asset)
             guard !Task.isCancelled, activeRequestIdentifier == requestIdentifier,
                   requestGeneration == generation else { return }
             image = quickImage
+            if !allowNetwork {
+                didFinishPreviewRequest = true
+                if quickImage != nil { return }
+            }
         }
-        if !allowNetwork, image != nil { return }
+        if !allowNetwork, image != nil {
+            didFinishPreviewRequest = true
+            return
+        }
 
         let onDegraded: (@MainActor (UIImage) -> Void)?
         if allowNetwork {
@@ -94,26 +147,45 @@ struct AssetImageView: View {
                 library.cacheReviewPreview(requestedImage, for: asset)
             }
         }
+        didFinishPreviewRequest = true
     }
 
     private var displayedImage: UIImage? {
         if activeRequestIdentifier == asset.localIdentifier, let image { return image }
-        if allowNetwork, targetSize == CGSize(width: 1_500, height: 1_500),
+        if requiresFullQuality, targetSize == CGSize(width: 1_500, height: 1_500),
            let cached = library.cachedReviewPreview(for: asset) { return cached }
+        if requiresFullQuality { return nil }
         if let initialPreview { return initialPreview }
         return max(targetSize.width, targetSize.height) >= 900
             ? library.cachedQuickPreview(for: asset) : nil
     }
+
+    private struct ImageRequestIdentity: Equatable {
+        let assetID: String
+        let allowNetwork: Bool
+        let targetSize: CGSize
+        let requiresFullQuality: Bool
+    }
 }
 
 struct AssetPreviewView: View {
+    private enum VideoPlaybackState {
+        case idle
+        case loading
+        case manual
+        case failed
+    }
+
     let asset: PHAsset
     let library: PhotoLibraryService
     @Binding var videoSoundEnabled: Bool
     var initialPreview: UIImage?
+    var requiresFullQuality = false
+    var autoplayVideo = false
     var cornerRadius: CGFloat = 28
     var isLivePhotoPressed = false
 
+    @Environment(AppSettings.self) private var settings
     @Environment(\.scenePhase) private var scenePhase
     @State private var player: AVPlayer?
     @State private var livePhoto: PHLivePhoto?
@@ -121,6 +193,8 @@ struct AssetPreviewView: View {
     @State private var livePhotoRequestTask: Task<Void, Never>?
     @State private var livePhotoLoadFailed = false
     @State private var activePlayerIdentifier: String?
+    @State private var videoPlaybackTask: Task<Void, Never>?
+    @State private var videoPlaybackState: VideoPlaybackState = .idle
     var body: some View {
         Group {
             if asset.mediaType == .video {
@@ -149,20 +223,27 @@ struct AssetPreviewView: View {
                         }
                         .onDisappear { player.pause() }
                 } else {
-                    AssetImageView(
-                        asset: asset,
-                        library: library,
-                        targetSize: CGSize(width: 1_500, height: 1_500),
-                        initialPreview: initialPreview
-                    )
+                    ZStack {
+                        AssetImageView(
+                            asset: asset,
+                            library: library,
+                            allowNetwork: false,
+                            targetSize: CGSize(width: 1_500, height: 1_500),
+                            initialPreview: initialPreview,
+                            requiresFullQuality: requiresFullQuality
+                        )
+                        .accessibilityLabel(String(localized: "视频预览"))
+                        videoPlaybackOverlay
+                    }
                 }
             } else {
                 AssetImageView(
                     asset: asset,
                     library: library,
-                    allowNetwork: true,
+                    allowNetwork: settings.iCloudAutoDownloadEnabled,
                     targetSize: CGSize(width: 1_500, height: 1_500),
-                    initialPreview: initialPreview
+                    initialPreview: initialPreview,
+                    requiresFullQuality: requiresFullQuality
                 )
                     .overlay {
                         if livePhotoAssetIdentifier == asset.localIdentifier,
@@ -174,16 +255,42 @@ struct AssetPreviewView: View {
                             .allowsHitTesting(false)
                         }
                     }
-                    .overlay(alignment: .topTrailing) {
-                        if asset.mediaSubtypes.contains(.photoLive) {
-                            Image(systemName: livePhotoLoadFailed && isLivePhotoPressed ?
-                                "exclamationmark.circle" : "livephoto")
-                                .accessibilityLabel(livePhotoLoadFailed && isLivePhotoPressed ?
-                                    String(localized: "实况照片暂时无法播放") : String(localized: "实况照片，长按 0.9 秒播放"))
-                            .font(.headline)
+                    .overlay {
+                        if asset.mediaSubtypes.contains(.photoLive), livePhotoLoadFailed {
+                            VStack(spacing: 6) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "exclamationmark.circle")
+                                    Text(String(localized: "实况照片加载失败"))
+                                        .font(.caption.weight(.medium))
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(.black.opacity(0.55), in: Capsule())
+                                .accessibilityLabel(String(localized: "实况照片暂时无法播放"))
+
+                                Button {
+                                    loadLivePhotoIfNeeded()
+                                } label: {
+                                    Label(String(localized: "重试播放"), systemImage: "arrow.clockwise")
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.black.opacity(0.6))
+                                .accessibilityLabel(String(localized: "重试播放实况照片"))
+                            }
                             .padding(10)
                             .foregroundStyle(.white)
                             .shadow(radius: 4)
+                        }
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if asset.mediaSubtypes.contains(.photoLive), !livePhotoLoadFailed {
+                            Image(systemName: "livephoto")
+                                .accessibilityLabel(String(localized: "实况照片，长按 0.9 秒播放"))
+                                .font(.title3.weight(.medium))
+                                .foregroundStyle(.white)
+                                .shadow(color: .black.opacity(0.65), radius: 3)
+                                .padding(10)
                         }
                     }
             }
@@ -203,25 +310,11 @@ struct AssetPreviewView: View {
             livePhoto = nil
             livePhotoAssetIdentifier = nil
             livePhotoLoadFailed = false
-            guard asset.mediaType == .video else { return }
-            PreviewAudioSession.prepareMutedPreview()
-            guard let item = await library.requestPlayerItem(for: asset) else { return }
-            guard !Task.isCancelled, activePlayerIdentifier == requestIdentifier else { return }
-            let previewPlayer = AVPlayer(playerItem: item)
-            if videoSoundEnabled, scenePhase == .active {
-                if PreviewAudioSession.beginAudiblePreview(for: requestIdentifier) {
-                    previewPlayer.isMuted = false
-                } else {
-                    previewPlayer.isMuted = true
-                    videoSoundEnabled = false
-                    PreviewAudioSession.prepareMutedPreview()
-                }
-            } else {
-                previewPlayer.isMuted = true
-            }
-            player = previewPlayer
-            if scenePhase == .active {
-                previewPlayer.play()
+            videoPlaybackTask?.cancel()
+            videoPlaybackTask = nil
+            videoPlaybackState = .idle
+            if asset.mediaType == .video, autoplayVideo {
+                startVideoPlayback(allowNetwork: false)
             }
         }
         .onChange(of: isLivePhotoPressed) { _, isPressed in
@@ -256,15 +349,14 @@ struct AssetPreviewView: View {
             player?.pause()
             PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
             player = nil
+            videoPlaybackTask?.cancel()
+            videoPlaybackTask = nil
+            videoPlaybackState = .idle
             livePhotoRequestTask?.cancel()
             livePhotoRequestTask = nil
             livePhoto = nil
             livePhotoAssetIdentifier = nil
         }
-        .accessibilityLabel(
-            asset.mediaType == .video ? String(localized: "视频预览") :
-                (asset.mediaSubtypes.contains(.photoLive) ? String(localized: "实况照片预览，长按 0.9 秒播放") : String(localized: "照片预览"))
-        )
     }
 
     private func toggleVideoSound(_ player: AVPlayer) {
@@ -282,6 +374,104 @@ struct AssetPreviewView: View {
         }
     }
 
+    @ViewBuilder
+    private var videoPlaybackOverlay: some View {
+        switch videoPlaybackState {
+        case .idle:
+            if autoplayVideo {
+                ProgressView()
+                    .tint(.white)
+            } else {
+                videoPlaybackButton {
+                    startVideoPlayback(allowNetwork: true)
+                }
+            }
+        case .manual:
+            videoPlaybackButton {
+                startVideoPlayback(allowNetwork: true)
+            }
+        case .loading:
+            VStack(spacing: 8) {
+                ProgressView()
+                    .tint(.white)
+                Text(String(localized: "正在加载视频…"))
+                    .font(.caption.weight(.medium))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        case .failed:
+            VStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.title3)
+                Text(String(localized: "视频加载失败"))
+                    .font(.caption.weight(.medium))
+                Button(String(localized: "重试播放")) {
+                    startVideoPlayback(allowNetwork: true)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.black.opacity(0.6))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
+    private func videoPlaybackButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(String(localized: "播放视频"), systemImage: "play.fill")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.black.opacity(0.62))
+        .foregroundStyle(.white)
+        .accessibilityLabel(String(localized: "播放视频"))
+        .accessibilityHint(String(localized: "点按后尝试载入视频，云端内容可能需要下载"))
+    }
+
+    private func startVideoPlayback(allowNetwork: Bool) {
+        guard asset.mediaType == .video,
+              player == nil,
+              videoPlaybackTask == nil else { return }
+
+        let requestIdentifier = asset.localIdentifier
+        videoPlaybackState = .loading
+        PreviewAudioSession.prepareMutedPreview()
+        videoPlaybackTask = Task { @MainActor in
+            let item = await library.requestPlayerItem(for: asset, allowNetwork: allowNetwork)
+            guard !Task.isCancelled, activePlayerIdentifier == requestIdentifier else { return }
+            guard let item else {
+                videoPlaybackState = allowNetwork ? .failed : .manual
+                videoPlaybackTask = nil
+                return
+            }
+
+            let previewPlayer = AVPlayer(playerItem: item)
+            if videoSoundEnabled, scenePhase == .active {
+                if PreviewAudioSession.beginAudiblePreview(for: requestIdentifier) {
+                    previewPlayer.isMuted = false
+                } else {
+                    previewPlayer.isMuted = true
+                    videoSoundEnabled = false
+                    PreviewAudioSession.prepareMutedPreview()
+                }
+            } else {
+                previewPlayer.isMuted = true
+            }
+            player = previewPlayer
+            videoPlaybackState = .idle
+            videoPlaybackTask = nil
+            if scenePhase == .active {
+                previewPlayer.play()
+            }
+        }
+    }
+
     private func loadLivePhotoIfNeeded() {
         guard asset.mediaSubtypes.contains(.photoLive),
               livePhotoAssetIdentifier != asset.localIdentifier,
@@ -290,7 +480,7 @@ struct AssetPreviewView: View {
         livePhotoLoadFailed = false
         let requestIdentifier = asset.localIdentifier
         livePhotoRequestTask = Task {
-            let requestedLivePhoto = await library.requestLivePhoto(for: asset)
+            let requestedLivePhoto = await library.requestLivePhoto(for: asset, allowNetwork: true)
             guard !Task.isCancelled, activePlayerIdentifier == requestIdentifier else { return }
             livePhoto = requestedLivePhoto
             livePhotoAssetIdentifier = requestedLivePhoto == nil ? nil : requestIdentifier
@@ -403,27 +593,35 @@ private final class ReviewLivePhotoView: PHLivePhotoView {
 struct DecisionTapZones: View {
     let isVideo: Bool
     let decisionEnabled: Bool
+    var capturesEmptyArea = false
     let onDelete: () -> Void
     let onKeep: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
-            if isVideo {
-                HStack(spacing: 0) {
-                    tapZone(action: onDelete)
-                        .frame(width: proxy.size.width * 0.24)
-                        .padding(.top, 64)
-                    Color.clear
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .allowsHitTesting(false)
-                    tapZone(action: onKeep)
-                        .frame(width: proxy.size.width * 0.24)
-                        .padding(.top, 64)
+            ZStack {
+                // Keep the entire empty area hit-testable for review swipes,
+                // including the space above and beside a landscape photo.
+                if capturesEmptyArea {
+                    Color.clear.contentShape(Rectangle())
                 }
-            } else {
-                HStack(spacing: 0) {
-                    tapZone(action: onDelete)
-                    tapZone(action: onKeep)
+                if isVideo {
+                    HStack(spacing: 0) {
+                        tapZone(action: onDelete)
+                            .frame(width: proxy.size.width * 0.24)
+                            .padding(.top, 64)
+                        Color.clear
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .allowsHitTesting(false)
+                        tapZone(action: onKeep)
+                            .frame(width: proxy.size.width * 0.24)
+                            .padding(.top, 64)
+                    }
+                } else {
+                    HStack(spacing: 0) {
+                        tapZone(action: onDelete)
+                        tapZone(action: onKeep)
+                    }
                 }
             }
         }
@@ -443,6 +641,7 @@ struct AssetSizeCapsule: View {
     let asset: PHAsset
     let sizes: AssetSizeService
 
+    @State private var showingSizeExplanation = false
     @State private var size: Int64?
     @State private var isFetching = false
     @State private var didAttempt = false
@@ -456,7 +655,7 @@ struct AssetSizeCapsule: View {
 
     var body: some View {
         Button {
-            fetchSize()
+            showingSizeExplanation = true
         } label: {
             Text(isFetching ? String(localized: "读取中") : sizeText)
                 .font(.caption.weight(.medium).monospacedDigit())
@@ -468,6 +667,12 @@ struct AssetSizeCapsule: View {
         .accessibilityLabel(size == nil ? String(localized: "获取照片文件大小") : String(localized: "照片文件大小 \(sizeText)"))
         .zeyingGlass(in: Capsule())
         .foregroundStyle(.secondary)
+        .confirmationDialog(String(localized: "文件大小"), isPresented: $showingSizeExplanation, titleVisibility: .visible) {
+            Button(String(localized: "获取大小")) { fetchSize() }
+            Button(String(localized: "取消"), role: .cancel) {}
+        } message: {
+            Text(String(localized: "资源大小不等同于可立即释放的本机空间。如果原片存储在 iCloud，获取大小可能需要下载原片。"))
+        }
         .task(id: asset.localIdentifier, priority: .utility) {
             explicitSizeTask?.cancel()
             activeAssetIdentifier = asset.localIdentifier
@@ -818,6 +1023,7 @@ struct AssetZoomView: View {
     let asset: PHAsset
     let library: PhotoLibraryService
 
+    @Environment(AppSettings.self) private var settings
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scale: CGFloat = 1
@@ -832,7 +1038,7 @@ struct AssetZoomView: View {
                 AssetImageView(
                     asset: asset,
                     library: library,
-                    allowNetwork: true,
+                    allowNetwork: asset.mediaType == .image && settings.iCloudAutoDownloadEnabled,
                     targetSize: CGSize(width: 2_400, height: 2_400)
                 )
                     .scaleEffect(scale)

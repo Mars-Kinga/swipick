@@ -2,6 +2,7 @@ import SwiftUI
 
 /// A short, skippable guide shown once before the first review session.
 struct FirstUseGuideView: View {
+    var compact = false
     let onFinish: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -9,15 +10,29 @@ struct FirstUseGuideView: View {
 
     private let steps: [GuideStep] = [
         GuideStep(
+            symbol: "icloud",
+            tint: .blue,
+            title: String(localized: "审核时显示清晰照片"),
+            intro: String(localized: "本地清晰照片会提前准备，iCloud 原片默认不自动下载。"),
+            tips: [
+                GuideTip(symbol: "photo", title: String(localized: "先看清，再决定"),
+                         detail: String(localized: "审核页不会用模糊缩略图代替清晰照片；仅存于 iCloud 的照片会显示等待提示。")),
+                GuideTip(symbol: "gearshape", title: String(localized: "需要高清时再开启"),
+                         detail: String(localized: "到“设置”开启“自动下载 iCloud 原片”，正在查看的照片才会自动加载高清内容；可能消耗流量和设备空间。")),
+                GuideTip(symbol: "play.circle", title: String(localized: "播放与导出按需加载"),
+                         detail: String(localized: "即使关闭自动下载，主动播放视频或实况、分享、转为静态照片时，仍可能下载所需内容。"))
+            ]
+        ),
+        GuideStep(
             symbol: "hand.draw",
             tint: .blue,
             title: String(localized: "三种手势，一张张选"),
-            intro: String(localized: "选完自动进入下一张；左右两侧也可以点按。"),
+            intro: String(localized: "用下方按钮或滑动做决定，选完自动进入下一项。侧边点按可在设置开启。"),
             tips: [
                 GuideTip(symbol: "arrow.left", title: String(localized: "左滑 · 待删除"),
-                         detail: String(localized: "左滑或点照片左侧，可将照片放进待删除清单；确认前不会从系统照片删除。")),
+                         detail: String(localized: "左滑或点“待删除”，加入待删除清单；确认前不会从系统照片删除。")),
                 GuideTip(symbol: "arrow.right", title: String(localized: "右滑 · 保留"),
-                         detail: String(localized: "右滑或点照片右侧，可保留当前照片或视频并进入下一张。")),
+                         detail: String(localized: "右滑或点“保留”，保留当前照片或视频并进入下一项。")),
                 GuideTip(symbol: "arrow.down", title: String(localized: "下滑 · 待决定"),
                          detail: String(localized: "明显向下滑并松手才生效；短滑或斜滑会回弹。"))
             ]
@@ -45,9 +60,9 @@ struct FirstUseGuideView: View {
             intro: String(localized: "看清内容后再决定。"),
             tips: [
                 GuideTip(symbol: "plus.magnifyingglass", title: String(localized: "放大照片"),
-                         detail: String(localized: "双指放大，放大后拖动查看细节。")),
+                         detail: String(localized: "双指放大查看细节，放大后可拖动。实况照片长按播放；本地视频自动静音播放，云端视频需要时再点播放。")),
                 GuideTip(symbol: "livephoto.slash", title: String(localized: "转为静态照片"),
-                         detail: String(localized: "点右上角带斜杠的 Live 图标创建静态照片。原拍摄时间不变，但“最近添加”会按新加入时间排序，位置可能与原照片不同。随后由 iOS 确认是否删除原件。")),
+                         detail: String(localized: "点带斜杠的 Live 图标创建静态副本。副本不保留动态画面和声音；原拍摄时间保留，但“最近添加”位置可能改变。核验副本后再选择是否删除原件。")),
                 GuideTip(symbol: "speaker.slash", title: String(localized: "视频声音"),
                          detail: String(localized: "视频默认静音；点扬声器后，本次审核的视频会沿用声音设置。")),
                 GuideTip(symbol: "info.circle", title: String(localized: "详情与分享"),
@@ -63,7 +78,7 @@ struct FirstUseGuideView: View {
                 GuideTip(symbol: "trash", title: String(localized: "删除全部"),
                          detail: String(localized: "待删除照片在清单里统一确认；系统可能再次提示。")),
                 GuideTip(symbol: "arrow.uturn.backward", title: String(localized: "不想删了"),
-                         detail: String(localized: "点单张“恢复”或“恢复全部”，照片就会改为保留。")),
+                         detail: String(localized: "点单张“改为保留”或“全部改为保留”，即可取消待删除决定。")),
                 GuideTip(symbol: "star", title: String(localized: "收藏与相簿"),
                          detail: String(localized: "收藏和已有相簿的整理会先暂存，再到清单分别确认。")),
                 GuideTip(symbol: "checkmark.shield", title: String(localized: "系统还会确认"),
@@ -77,16 +92,20 @@ struct FirstUseGuideView: View {
             intro: String(localized: "默认暂存时，可以撤销或重新选择。"),
             tips: [
                 GuideTip(symbol: "arrow.uturn.backward", title: String(localized: "撤销上一张"),
-                         detail: String(localized: "点审核页的回转箭头，回到刚才那张。")),
+                         detail: String(localized: "“撤销”会恢复本次上一项的决定和相簿待办；重开后“上一张”用于回看。")),
                 GuideTip(symbol: "questionmark.circle", title: String(localized: "待决定单独放"),
-                         detail: String(localized: "到下方“待决定”页，可重新选择保留或删除。")),
+                         detail: String(localized: "在首页打开“待决定”，可重新选择保留或删除。")),
                 GuideTip(symbol: "star", title: String(localized: "收藏也先暂存"),
                          detail: String(localized: "未收藏的照片点星星会保留并暂存收藏，清单确认后再同步。")),
                 GuideTip(symbol: "star.fill", title: String(localized: "实心星星"),
-                         detail: String(localized: "表示系统照片已收藏；点按并确认可取消收藏，照片不会删除。"))
+                         detail: String(localized: "“待确认收藏”表示本地待办；“已收藏”表示系统照片已收藏，点按并确认可取消收藏。"))
             ]
         )
     ]
+
+    private var guideSteps: [GuideStep] {
+        compact ? [steps[0], steps[1], steps[4], steps[3]] : steps
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -103,8 +122,8 @@ struct FirstUseGuideView: View {
             .padding(.top, 20)
 
             TabView(selection: $page) {
-                ForEach(steps.indices, id: \.self) { index in
-                    guidePage(steps[index])
+                ForEach(guideSteps.indices, id: \.self) { index in
+                    guidePage(guideSteps[index])
                         .tag(index)
                 }
             }
@@ -112,7 +131,7 @@ struct FirstUseGuideView: View {
             .indexViewStyle(.page(backgroundDisplayMode: .interactive))
 
             Button {
-                if page == steps.count - 1 {
+                if page == guideSteps.count - 1 {
                     onFinish()
                 } else if reduceMotion {
                     page += 1
@@ -120,7 +139,7 @@ struct FirstUseGuideView: View {
                     withAnimation(.snappy(duration: 0.24)) { page += 1 }
                 }
             } label: {
-                Text(page == steps.count - 1 ? String(localized: "开始整理") : String(localized: "下一步"))
+                Text(page == guideSteps.count - 1 ? String(localized: "开始整理") : String(localized: "下一步"))
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 7)

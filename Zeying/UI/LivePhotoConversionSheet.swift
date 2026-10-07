@@ -16,6 +16,8 @@ struct LivePhotoConversionSheet: View {
     @State private var progressMessage: String?
     @State private var errorMessage: String?
     @State private var showingCancelConfirmation = false
+    @State private var operationTask: Task<Void, Never>?
+    @State private var canCancelPreparation = false
 
     private let conversions = LivePhotoConversionManager.shared
 
@@ -61,8 +63,14 @@ struct LivePhotoConversionSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(record == nil ? String(localized: "关闭") : String(localized: "稍后继续")) { dismiss() }
-                        .disabled(isBusy)
+                    if canCancelPreparation {
+                        Button(String(localized: "取消")) {
+                            operationTask?.cancel()
+                        }
+                    } else {
+                        Button(record == nil ? String(localized: "关闭") : String(localized: "稍后继续")) { dismiss() }
+                            .disabled(isBusy)
+                    }
                 }
             }
             .interactiveDismissDisabled(isBusy)
@@ -91,10 +99,18 @@ struct LivePhotoConversionSheet: View {
                     if still == nil || source == nil {
                         await library.refresh()
                     }
-                    if record?.phase == .preparing, source != nil {
-                        await prepareCopy(continueToDeletion: false)
+                    if let record,
+                       source != nil,
+                       (record.phase == .preparing ||
+                        (record.stillIdentifier != nil && record.verification != .verified)) {
+                        let task = Task { await prepareCopy(continueToDeletion: false) }
+                        operationTask = task
+                        await task.value
                     }
                 }
+            }
+            .onDisappear {
+                operationTask?.cancel()
             }
         }
     }
@@ -105,8 +121,12 @@ struct LivePhotoConversionSheet: View {
                 .font(.title2.weight(.semibold))
             Text(record?.phase == .originalDeleted
                  ? String(localized: "原实况照片已删除，静态照片已保留。完成本地记录后即可继续整理。")
-                 : record?.phase == .awaitingOriginalDeletion
-                   ? String(localized: "静态照片已准备好。继续后，iOS 会确认是否删除原实况照片。")
+                 : record?.verification == .verified
+                   ? String(localized: "静态照片已核对通过。继续后，iOS 会确认是否删除原实况照片。")
+                 : record?.verification == .failed
+                   ? String(localized: "静态照片上次核对未通过。原实况照片仍然保留，请重新核对后再继续。")
+                 : record?.stillIdentifier != nil
+                   ? String(localized: "静态照片已创建，尚未完成核对；核对通过后才能删除原实况照片。")
                    : String(localized: "创建静态照片并核对拍摄时间与相簿，然后由 iOS 确认删除原实况照片。"))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -117,10 +137,10 @@ struct LivePhotoConversionSheet: View {
                         .font(.subheadline.weight(.medium))
                 }
                 .accessibilityElement(children: .combine)
-            } else if record?.phase == .awaitingOriginalDeletion {
-                Label(String(localized: "静态副本已创建，原件仍在图库中"), systemImage: "checkmark.circle.fill")
+            } else if let record, record.stillIdentifier != nil {
+                Label(verificationMessage(for: record), systemImage: verificationSymbol(for: record))
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(verificationColor(for: record))
             }
             if PHPhotoLibrary.authorizationStatus(for: .readWrite) != .authorized {
                 Label(String(localized: "安全转换需要完整照片访问权限，以核对原相簿。"), systemImage: "lock.shield")
@@ -163,8 +183,12 @@ struct LivePhotoConversionSheet: View {
 
     private var preparationAction: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Text(String(localized: "转换会移除动态片段和编辑历史；新照片会按加入日期出现在“最近添加”，同时保留原拍摄时间和相簿。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Button {
-                Task { await prepareCopy(continueToDeletion: true) }
+                launchPreparation(continueToDeletion: true)
             } label: {
                 Label(record == nil ? String(localized: "转为静态照片") : String(localized: "重新尝试转换"), systemImage: "photo.badge.plus")
                     .frame(maxWidth: .infinity)
@@ -173,26 +197,22 @@ struct LivePhotoConversionSheet: View {
             .tint(.blue)
             .disabled(isBusy || source == nil ||
                       PHPhotoLibrary.authorizationStatus(for: .readWrite) != .authorized)
-
-            Text(String(localized: "照片会保留原拍摄时间和相簿；动态片段不会保留。"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 
     private var replacementActions: some View {
         VStack(spacing: 12) {
             Button {
-                Task { await deleteOriginal() }
+                launchDeleteOriginal()
             } label: {
                 Label(record?.phase == .originalDeleted ? String(localized: "完成本地记录") :
                       source == nil ? String(localized: "完成转换") : String(localized: "删除原件并完成转换"),
                       systemImage: "checkmark.circle")
-                    .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .tint(.blue)
-            .disabled(isBusy || still == nil)
+            .disabled(isBusy || still == nil || (record?.verification != .verified && source != nil))
 
             if record?.phase != .originalDeleted, source != nil {
                 Button {
@@ -205,7 +225,7 @@ struct LivePhotoConversionSheet: View {
                 .disabled(isBusy)
             }
 
-            Text(String(localized: "静态照片已自动核对。新照片不包含动态片段和编辑历史；“最近添加”会显示为今天。"))
+            Text(verificationFooter)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -215,11 +235,18 @@ struct LivePhotoConversionSheet: View {
         guard let source else { return }
         operationPreviewAsset = source
         isBusy = true
+        canCancelPreparation = true
         progressMessage = String(localized: "正在创建静态照片…")
         do {
             _ = try await conversions.prepare(asset: source, library: library)
+            // Once PhotoKit has created the copy, keep the task alive long
+            // enough for the manager to persist its identifier. Cancellation
+            // here leaves the verified copy in the journal for a later retry.
+            try Task.checkCancellation()
+            canCancelPreparation = false
             if continueToDeletion {
                 progressMessage = String(localized: "请在 iOS 中确认删除原件…")
+                try Task.checkCancellation()
                 try await conversions.deleteOriginal(
                     sourceIdentifier: sourceIdentifier,
                     library: library,
@@ -231,14 +258,19 @@ struct LivePhotoConversionSheet: View {
             } else {
                 await library.refresh()
             }
+        } catch is CancellationError {
+            if conversions.conversion(for: sourceIdentifier)?.stillIdentifier != nil {
+                await library.refresh()
+            }
         } catch {
             // A failed or declined system deletion leaves the verified still
             // and the original intact. Show the copy so deletion can be retried.
             if record?.stillIdentifier != nil { await library.refresh() }
-            errorMessage = error.localizedDescription
+            errorMessage = PhotosFailureMessage.message(for: error)
         }
         progressMessage = nil
         isBusy = false
+        canCancelPreparation = false
         operationPreviewAsset = nil
     }
 
@@ -256,7 +288,7 @@ struct LivePhotoConversionSheet: View {
             dismiss()
             onFinished?()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = PhotosFailureMessage.message(for: error)
         }
         progressMessage = nil
         isBusy = false
@@ -271,10 +303,64 @@ struct LivePhotoConversionSheet: View {
             try await conversions.deleteStillCopy(sourceIdentifier: sourceIdentifier, library: library)
             dismiss()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = PhotosFailureMessage.message(for: error)
         }
         progressMessage = nil
         isBusy = false
         operationPreviewAsset = nil
+    }
+
+    private func launchPreparation(continueToDeletion: Bool) {
+        operationTask?.cancel()
+        operationTask = Task { await prepareCopy(continueToDeletion: continueToDeletion) }
+    }
+
+    private func launchDeleteOriginal() {
+        operationTask?.cancel()
+        operationTask = Task { await deleteOriginal() }
+    }
+
+    private func verificationMessage(for record: LivePhotoConversion) -> String {
+        switch record.verification {
+        case .verified:
+            return String(localized: "静态副本已核对通过，原件仍在图库中")
+        case .pending:
+            return String(localized: "静态副本正在等待核对")
+        case .failed:
+            return String(localized: "静态副本核对失败，原件仍然保留")
+        }
+    }
+
+    private func verificationSymbol(for record: LivePhotoConversion) -> String {
+        switch record.verification {
+        case .verified:
+            return "checkmark.circle.fill"
+        case .pending:
+            return "clock"
+        case .failed:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func verificationColor(for record: LivePhotoConversion) -> Color {
+        switch record.verification {
+        case .verified:
+            return .green
+        case .pending:
+            return .secondary
+        case .failed:
+            return .orange
+        }
+    }
+
+    private var verificationFooter: String {
+        switch record?.verification {
+        case .verified:
+            return String(localized: "静态照片已核对通过。新照片不包含动态片段和编辑历史；“最近添加”会显示为今天。")
+        case .failed:
+            return String(localized: "静态照片尚未通过核对；原件仍保留。重新尝试会再次检查现有副本，不会重复导入。")
+        default:
+            return String(localized: "静态照片会在继续前核对；新照片不包含动态片段和编辑历史。")
+        }
     }
 }

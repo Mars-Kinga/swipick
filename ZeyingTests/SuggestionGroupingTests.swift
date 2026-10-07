@@ -1,0 +1,165 @@
+import Foundation
+import Testing
+@testable import Zeying
+
+struct SuggestionGroupingTests {
+    private let now = Date(timeIntervalSince1970: 1_780_000_000)
+
+    private func asset(_ id: String, seconds: TimeInterval = 0, screenshot: Bool = false,
+                       protected: Bool = false, live: Bool = false) -> SuggestionAsset {
+        SuggestionAsset(id: id, modifiedAt: now, createdAt: now.addingTimeInterval(seconds), width: 1200, height: 1600,
+                        isScreenshot: screenshot, isLivePhoto: live, burstID: nil,
+                        isProtected: protected, isEligible: !protected)
+    }
+
+    private func analysis(_ asset: SuggestionAsset, hash: UInt64 = 0, digest: String? = nil,
+                          screenshotKind: TemporaryScreenshotKind? = nil,
+                          screenshotContentChecked: Bool? = nil,
+                          hasPastEvent: Bool = false, eventDates: [Date]? = nil) -> SuggestionAnalysis {
+        SuggestionAnalysis(asset: asset, differenceHash: hash, featurePrint: Data(), hasPastEvent: hasPastEvent,
+                           eventDates: eventDates, temporaryScreenshotKind: screenshotKind,
+                           screenshotContentChecked: screenshotContentChecked,
+                           resourceDigest: digest, resourceBytes: digest == nil ? nil : 100, checkedResources: digest != nil)
+    }
+
+    @Test("修图版与原图画面相近但资源不同，只给比较参考，不归入重复副本")
+    func editedVersionsRemainSeparateChoices() {
+        let a = asset("original"), b = asset("edited", seconds: 1000)
+        let groups = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: analysis(a, digest: "original-bytes"), b.id: analysis(b, digest: "edited-bytes")], now: now) { _, _ in 0.01 }
+        #expect(groups.count == 1)
+        #expect(groups.first?.kind == .similar)
+        #expect(groups.first?.reason == .possibleVersions)
+        #expect(groups.first?.recommendedKeepID == nil)
+    }
+
+    @Test("未经完整资源确认的视觉相近照片只能作为相近版本")
+    func previewsCannotConfirmDuplicates() {
+        let a = asset("a"), b = asset("b")
+        let groups = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: analysis(a), b.id: analysis(b)], now: now) { _, _ in 0.01 }
+        #expect(groups.allSatisfy { $0.kind != .duplicates })
+    }
+
+    @Test("完整资源相同优先归组，并保护收藏参照，照片不重复出现")
+    func confirmedCopiesTakePrecedence() {
+        let a = asset("favorite", protected: true), b = asset("copy", screenshot: true)
+        let groups = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: analysis(a, digest: "same"), b.id: analysis(b, digest: "same")], now: now) { _, _ in 0 }
+        #expect(groups.count == 1)
+        #expect(groups.first?.reason == .identicalResources)
+        #expect(groups.first?.recommendedKeepID == "favorite")
+        #expect(groups.first?.protectedIDs == ["favorite"])
+        #expect(groups.first?.knownBytes == 200)
+    }
+
+    @Test("相似链的两端不同，不应被串成同一组")
+    func similarityIsNotTransitive() {
+        let a = asset("a"), b = asset("b", seconds: 1), c = asset("c", seconds: 2)
+        let analyses = ["a": analysis(a, hash: 0), "b": analysis(b, hash: 0xffff), "c": analysis(c, hash: 0xffffffff)]
+        let groups = SuggestionGrouping.build(assets: [a, b, c], analyses: analyses, now: now) { left, right in
+            Set([left, right]) == Set(["a", "c"]) ? 0.9 : 0.15
+        }
+        #expect(groups.count == 1)
+        #expect(groups.first?.assetIDs == ["a", "b"])
+        #expect(groups.first?.recommendedKeepID == nil)
+    }
+
+    @Test("几分钟内同一场景的多张照片可归入一组")
+    func nearbySeriesCanContainMoreThanThreePhotos() {
+        let photos = (0..<6).map { asset("scene-\($0)", seconds: TimeInterval($0 * 60)) }
+        let analyses = Dictionary(uniqueKeysWithValues: photos.map { ($0.id, analysis($0)) })
+        let groups = SuggestionGrouping.build(assets: photos, analyses: analyses, now: now) { _, _ in 0.15 }
+        #expect(groups.count == 1)
+        #expect(groups.first?.assetIDs.count == 6)
+        #expect(groups.first?.reason == .nearbyShots)
+    }
+
+    @Test("Vision 给出明确美学评分时推荐较高者，不用拍摄时间代替审美")
+    func aestheticsRanksSimilarPhotos() {
+        let older = asset("older"), newer = asset("newer", seconds: 10)
+        var olderAnalysis = analysis(older)
+        olderAnalysis.aestheticScore = 0.38
+        var newerAnalysis = analysis(newer)
+        newerAnalysis.aestheticScore = 0.19
+        let groups = SuggestionGrouping.build(assets: [older, newer], analyses: [
+            older.id: olderAnalysis, newer.id: newerAnalysis
+        ], now: now) { _, _ in 0.01 }
+        #expect(groups.first?.recommendedKeepID == older.id)
+        #expect(groups.first?.recommendationBasis == .visionAesthetics)
+        #expect(abs((groups.first?.aestheticLead ?? 0) - 0.19) < 0.001)
+    }
+
+    @Test("评分未覆盖整组时暂不推荐，避免只分析一张就宣称最佳")
+    func incompleteScoresDoNotRecommend() {
+        let a = asset("a"), b = asset("b", seconds: 10)
+        var scored = analysis(a)
+        scored.aestheticScore = 0.9
+        let groups = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: scored, b.id: analysis(b)], now: now) { _, _ in 0.01 }
+        #expect(groups.first?.recommendedKeepID == nil)
+        #expect(groups.first?.aestheticEvaluationComplete == false)
+    }
+
+    @Test("Vision 分数打平时不捏造最佳照片，但保留每张分数供用户比较")
+    func tiedScoresRemainAvailableWithoutInventingAWinner() {
+        let a = asset("a"), b = asset("b", seconds: 10)
+        var first = analysis(a)
+        var second = analysis(b)
+        first.aestheticScore = 0.47
+        second.aestheticScore = 0.47
+        first.aestheticChecked = true
+        second.aestheticChecked = true
+        let group = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: first, b.id: second], now: now) { _, _ in 0.01 }.first
+        #expect(group?.recommendedKeepID == nil)
+        #expect(group?.aestheticScores.count == 2)
+        #expect(group?.aestheticEvaluationComplete == true)
+    }
+
+    @Test("整组美学评分失败后也结束比较状态，不让提示无限转圈")
+    func failedScoresFinishComparison() {
+        let a = asset("a"), b = asset("b", seconds: 10)
+        var first = analysis(a)
+        var second = analysis(b)
+        first.aestheticChecked = true
+        second.aestheticChecked = true
+        let groups = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: first, b.id: second], now: now) { _, _ in 0.01 }
+        #expect(groups.first?.kind == .similar)
+        #expect(groups.first?.aestheticEvaluationComplete == true)
+        #expect(groups.first?.recommendedKeepID == nil)
+    }
+
+    @Test("缓存了内容证据的旧截图无需再次下载预览，近期截图仍不进入时间建议")
+    func oldScreenshotsNeedNoImageDownload() {
+        let old = asset("old", seconds: -100 * 86_400, screenshot: true)
+        let fresh = asset("new", screenshot: true)
+        let groups = SuggestionGrouping.build(
+            assets: [fresh, old],
+            analyses: [old.id: analysis(old, screenshotKind: .verificationCodes, screenshotContentChecked: true)],
+            now: now
+        ) { _, _ in nil }
+        #expect(groups.count == 1)
+        #expect(groups.first?.assetIDs == ["old"])
+        #expect(groups.first?.kind == .screenshots)
+        #expect(groups.first?.reason == .olderVerificationCodes)
+        #expect(groups.first?.recommendedKeepID == nil)
+    }
+
+    @Test("照片修改或尺寸变化使缓存失效，收藏变化仍可复用图像特征")
+    func cacheTracksImageChanges() {
+        let original = asset("a")
+        let cached = analysis(original)
+        var protected = original
+        protected.isProtected = true
+        #expect(cached.matches(protected))
+        let changed = SuggestionAsset(id: original.id, modifiedAt: now.addingTimeInterval(1), createdAt: original.createdAt,
+                                      width: original.width, height: original.height, isScreenshot: false, isLivePhoto: false,
+                                      burstID: nil, isProtected: false, isEligible: true)
+        #expect(!cached.matches(changed))
+    }
+
+    @Test("活动日期规则需要活动语境、完整年份与合法的过去日期")
+    func eventDatesAreConservative() {
+        #expect(ScreenshotEventDate.hasPastEvent(in: "音乐会 2020年9月12日 入场", now: now))
+        #expect(!ScreenshotEventDate.hasPastEvent(in: "订单 2020-09-12", now: now))
+        #expect(!ScreenshotEventDate.hasPastEvent(in: "活动 2099-09-12", now: now))
+        #expect(!ScreenshotEventDate.hasPastEvent(in: "演出 2020-02-31", now: now))
+        #expect(!ScreenshotEventDate.hasPastEvent(in: "演出 9月12日", now: now))
+    }
+}

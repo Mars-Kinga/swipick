@@ -10,6 +10,16 @@ struct LivePhotoConversion: Codable, Identifiable {
         case originalDeleted
     }
 
+    /// Verification is persisted separately from the conversion phase. A
+    /// still can already exist in Photos while its metadata and album
+    /// membership are still being checked. Older journal entries decode as
+    /// `.pending`, so a legacy record is never treated as verified.
+    enum Verification: String, Codable {
+        case pending
+        case verified
+        case failed
+    }
+
     let sourceIdentifier: String
     let token: UUID
     let startedAt: Date
@@ -18,8 +28,56 @@ struct LivePhotoConversion: Codable, Identifiable {
     let albumIdentifiers: [String]
     var stillIdentifier: String?
     var phase: Phase
+    var verification: Verification
 
     var id: String { sourceIdentifier }
+
+    private enum CodingKeys: String, CodingKey {
+        case sourceIdentifier
+        case token
+        case startedAt
+        case creationDate
+        case sourceModificationDate
+        case albumIdentifiers
+        case stillIdentifier
+        case phase
+        case verification
+    }
+
+    init(
+        sourceIdentifier: String,
+        token: UUID,
+        startedAt: Date,
+        creationDate: Date,
+        sourceModificationDate: Date?,
+        albumIdentifiers: [String],
+        stillIdentifier: String?,
+        phase: Phase,
+        verification: Verification = .pending
+    ) {
+        self.sourceIdentifier = sourceIdentifier
+        self.token = token
+        self.startedAt = startedAt
+        self.creationDate = creationDate
+        self.sourceModificationDate = sourceModificationDate
+        self.albumIdentifiers = albumIdentifiers
+        self.stillIdentifier = stillIdentifier
+        self.phase = phase
+        self.verification = verification
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sourceIdentifier = try container.decode(String.self, forKey: .sourceIdentifier)
+        token = try container.decode(UUID.self, forKey: .token)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        creationDate = try container.decode(Date.self, forKey: .creationDate)
+        sourceModificationDate = try container.decodeIfPresent(Date.self, forKey: .sourceModificationDate)
+        albumIdentifiers = try container.decode([String].self, forKey: .albumIdentifiers)
+        stillIdentifier = try container.decodeIfPresent(String.self, forKey: .stillIdentifier)
+        phase = try container.decode(Phase.self, forKey: .phase)
+        verification = try container.decodeIfPresent(Verification.self, forKey: .verification) ?? .pending
+    }
 }
 
 enum LivePhotoConversionError: LocalizedError {
@@ -29,6 +87,8 @@ enum LivePhotoConversionError: LocalizedError {
     case exportFailed(String)
     case creationFailed(String)
     case copyUnverified(String)
+    case userCancelled
+    case deletionFailed(String)
     case conversionMissing
     case operationAlreadyRunning
     case journalUnreadable
@@ -47,6 +107,10 @@ enum LivePhotoConversionError: LocalizedError {
             String(localized: "无法创建静态照片：\(detail)")
         case .copyUnverified(let detail):
             String(localized: "静态副本尚未通过核对：\(detail)。原实况照片仍然保留。")
+        case .userCancelled:
+            String(localized: "已取消删除，静态副本和原实况照片都保留；待办仍在。")
+        case .deletionFailed(let detail):
+            String(localized: "无法删除原实况照片：\(detail)。原件仍然保留，待办仍在。")
         case .conversionMissing:
             String(localized: "找不到尚未完成的静态转换。")
         case .operationAlreadyRunning:
@@ -116,16 +180,32 @@ final class LivePhotoConversionManager {
                let recovered = await Self.findStill(with: existing.token, date: existing.creationDate) {
                 existing.stillIdentifier = recovered
                 existing.phase = .awaitingOriginalDeletion
+                existing.verification = .pending
                 try store(existing)
             }
             if let stillIdentifier = existing.stillIdentifier,
                Self.fetchAsset(stillIdentifier) == nil,
                existing.phase != .originalDeleted {
-                try remove(sourceIdentifier)
-            } else if existing.stillIdentifier != nil {
-                try verify(existing, requireOriginal: existing.phase != .originalDeleted)
+                // A just-created asset can be absent from the current
+                // snapshot for a short time. Search by our unique filename
+                // before deciding that a retry should create anything.
+                if let recovered = await Self.findStill(with: existing.token, date: existing.creationDate) {
+                    existing.stillIdentifier = recovered
+                    existing.verification = .pending
+                    try store(existing)
+                } else if Date().timeIntervalSince(existing.startedAt) <= 30 {
+                    throw LivePhotoConversionError.creationFailed(
+                        String(localized: "系统可能仍在导入副本，请稍后再试")
+                    )
+                } else {
+                    try remove(sourceIdentifier)
+                }
+            }
+            if existing.stillIdentifier != nil,
+               pending[sourceIdentifier] != nil {
+                try verifyAndStore(&existing, requireOriginal: existing.phase != .originalDeleted)
                 return existing
-            } else {
+            } else if existing.stillIdentifier == nil {
                 guard Date().timeIntervalSince(existing.startedAt) > 30 else {
                     throw LivePhotoConversionError.creationFailed(String(localized: "系统可能仍在导入副本，请稍后再试"))
                 }
@@ -150,16 +230,20 @@ final class LivePhotoConversionManager {
             sourceModificationDate: original.modificationDate,
             albumIdentifiers: albums.map(\.localIdentifier),
             stillIdentifier: nil,
-            phase: .preparing
+            phase: .preparing,
+            verification: .pending
         )
         try store(record)
 
         let exported: ExportedStill
         do {
             exported = try await Self.exportCurrentStill(for: original)
+        } catch is CancellationError {
+            try? remove(sourceIdentifier)
+            throw CancellationError()
         } catch {
             try? remove(sourceIdentifier)
-            throw LivePhotoConversionError.exportFailed(error.localizedDescription)
+            throw LivePhotoConversionError.exportFailed(PhotosFailureMessage.message(for: error))
         }
         if Task.isCancelled {
             try? remove(sourceIdentifier)
@@ -173,15 +257,25 @@ final class LivePhotoConversionManager {
         }
         let filename = "ZeyingStill-\(token.uuidString).\(fileExtension)"
         let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        // Register cleanup before the first write or cancellation check. A
+        // cancellation arriving after the write must not leave the exported
+        // frame behind in the temporary directory.
+        defer { try? FileManager.default.removeItem(at: fileURL) }
         do {
             try await Task.detached(priority: .utility) {
                 try exported.data.write(to: fileURL, options: .atomic)
             }.value
+        } catch is CancellationError {
+            try? remove(sourceIdentifier)
+            throw CancellationError()
         } catch {
             try? remove(sourceIdentifier)
-            throw LivePhotoConversionError.exportFailed(error.localizedDescription)
+            throw LivePhotoConversionError.exportFailed(PhotosFailureMessage.message(for: error))
         }
-        defer { try? FileManager.default.removeItem(at: fileURL) }
+        if Task.isCancelled {
+            try? remove(sourceIdentifier)
+            throw CancellationError()
+        }
 
         let newIdentifier = LockedCreatedIdentifier()
         do {
@@ -206,7 +300,7 @@ final class LivePhotoConversionManager {
         } catch {
             // Leave the token in the journal. If Photos imported the asset
             // despite an interrupted callback, recovery can find its filename.
-            throw LivePhotoConversionError.creationFailed(error.localizedDescription)
+            throw LivePhotoConversionError.creationFailed(PhotosFailureMessage.message(for: error))
         }
 
         guard let stillIdentifier = newIdentifier.value else {
@@ -214,11 +308,15 @@ final class LivePhotoConversionManager {
         }
         record.stillIdentifier = stillIdentifier
         record.phase = .awaitingOriginalDeletion
+        record.verification = .pending
         try store(record)
+        // Persist the still identifier before validation. If the task is
+        // cancelled after PhotoKit commits, recovery sees this record and
+        // validates the existing copy instead of importing a duplicate.
         // Verification fetches the newly created asset directly. The normal
         // library snapshot refresh happens after deletion (or on recovery),
         // avoiding a full-library scan between the two conversion steps.
-        try verify(record, requireOriginal: true)
+        try verifyAndStore(&record, requireOriginal: true)
         return record
     }
 
@@ -244,20 +342,29 @@ final class LivePhotoConversionManager {
             record.phase = .originalDeleted
             try store(record)
         }
-        try verify(record, requireOriginal: record.phase != .originalDeleted)
+        // Always verify again on every retry. A legacy or previously failed
+        // record must earn the verified state before any destructive change.
+        try verifyAndStore(&record, requireOriginal: record.phase != .originalDeleted)
 
         if record.phase != .originalDeleted {
-            guard Self.fetchAsset(sourceIdentifier) != nil else {
+            guard let original = Self.fetchAsset(sourceIdentifier) else {
                 throw LivePhotoConversionError.originalUnavailable
             }
-            let deleted = try await library.delete([sourceIdentifier])
-            guard deleted.contains(sourceIdentifier) else {
-                throw LivePhotoConversionError.originalUnavailable
+            // Keep the PhotoKit error intact so an explicit system
+            // cancellation remains a pending conversion instead of becoming
+            // a generic failure. The record is written immediately after the
+            // PhotoKit transaction, before the library snapshot refresh.
+            try await Self.deleteAsset(original)
+            guard Self.fetchAsset(sourceIdentifier) == nil else {
+                throw LivePhotoConversionError.deletionFailed(
+                    String(localized: "系统尚未确认原件已移除")
+                )
             }
             record.phase = .originalDeleted
             try store(record)
         }
         try finishLocalState(record, reviews: reviews, albumAssignments: albumAssignments)
+        await library.refresh()
     }
 
     /// Offers a way to abandon the operation without leaving a duplicate.
@@ -278,10 +385,16 @@ final class LivePhotoConversionManager {
             throw LivePhotoConversionError.originalUnavailable
         }
         if Self.fetchAsset(stillIdentifier) != nil {
-            let deleted = try await library.delete([stillIdentifier])
-            guard deleted.contains(stillIdentifier) else {
-                throw LivePhotoConversionError.copyUnverified(String(localized: "无法删除静态副本"))
+            guard let still = Self.fetchAsset(stillIdentifier) else {
+                throw LivePhotoConversionError.copyUnverified(String(localized: "无法找到静态副本"))
             }
+            try await Self.deleteAsset(still)
+            guard Self.fetchAsset(stillIdentifier) == nil else {
+                throw LivePhotoConversionError.copyUnverified(
+                    String(localized: "系统尚未确认静态副本已删除")
+                )
+            }
+            await library.refresh()
         }
         try remove(sourceIdentifier)
     }
@@ -297,15 +410,26 @@ final class LivePhotoConversionManager {
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else { return }
         for record in pendingConversions {
             if record.phase == .originalDeleted {
-                try? finishLocalState(
-                    record, reviews: reviews, albumAssignments: albumAssignments
-                )
+                var updated = record
+                do {
+                    try verifyAndStore(&updated, requireOriginal: false)
+                    try finishLocalState(
+                        updated, reviews: reviews, albumAssignments: albumAssignments
+                    )
+                } catch {
+                    // Keep the journal entry visible until both the copy
+                    // verification and local record migration succeed.
+                }
             } else if record.phase == .preparing,
                       let recovered = await Self.findStill(with: record.token, date: record.creationDate) {
                 var updated = record
                 updated.stillIdentifier = recovered
                 updated.phase = .awaitingOriginalDeletion
+                updated.verification = .pending
                 try? store(updated)
+                if Self.fetchAsset(record.sourceIdentifier) != nil {
+                    try? verifyAndStore(&updated, requireOriginal: true)
+                }
             }
         }
         await library.refresh()
@@ -384,6 +508,26 @@ final class LivePhotoConversionManager {
         }
     }
 
+    /// Writes an explicit pending state before each check and only records
+    /// `.verified` after every asset, date, original and album assertion has
+    /// passed. A failed check remains recoverable and visible in the journal.
+    private func verifyAndStore(
+        _ record: inout LivePhotoConversion,
+        requireOriginal: Bool
+    ) throws {
+        record.verification = .pending
+        try store(record)
+        do {
+            try verify(record, requireOriginal: requireOriginal)
+            record.verification = .verified
+            try store(record)
+        } catch {
+            record.verification = .failed
+            try? store(record)
+            throw error
+        }
+    }
+
     private func store(_ record: LivePhotoConversion) throws {
         var updated = pending
         updated[record.sourceIdentifier] = record
@@ -415,6 +559,18 @@ final class LivePhotoConversionManager {
 
     private static func fetchAsset(_ identifier: String) -> PHAsset? {
         PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject
+    }
+
+    private static func deleteAsset(_ asset: PHAsset) async throws {
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }
+        } catch let error as PHPhotosError where error.code == .userCancelled {
+            throw LivePhotoConversionError.userCancelled
+        } catch {
+            throw LivePhotoConversionError.deletionFailed(PhotosFailureMessage.message(for: error))
+        }
     }
 
     private static func editableAlbums(containing asset: PHAsset) throws -> [PHAssetCollection] {

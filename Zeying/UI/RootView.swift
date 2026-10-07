@@ -7,6 +7,7 @@ struct RootView: View {
     let sizes: AssetSizeService
     let albumService: PhotoAlbumService
     let albumAssignments: PendingAlbumAssignmentStore
+    let suggestions: PhotoSuggestionService
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -24,7 +25,7 @@ struct RootView: View {
             if shouldShowLoadingSplash {
                 LoadingSplashView()
             } else if shouldShowFirstUseGuide {
-                FirstUseGuideView { hasSeenGuide = true }
+                FirstUseGuideView(compact: true) { hasSeenGuide = true }
             } else {
                 tabView
             }
@@ -32,6 +33,14 @@ struct RootView: View {
         .task(id: shouldStartLibraryLoad) {
             guard shouldStartLibraryLoad else { return }
             await library.ensureLoaded()
+        }
+        // Suggestions are prepared while the app is in use, so opening the
+        // Suggestions tab can show useful results immediately. The service
+        // still respects an explicit manual pause and the device power budget.
+        .task(id: library.revision) {
+            guard library.hasLoaded, scenePhase == .active else { return }
+            suggestions.startIfNeeded(library: library, reviews: reviews)
+            if !suggestions.hasScanned { suggestions.scheduleBackgroundCheck(after: 0) }
         }
         .task(id: library.hasLoaded) {
             guard library.hasLoaded,
@@ -44,13 +53,62 @@ struct RootView: View {
         }
         .environment(settings)
         .environment(resume)
+        .environment(suggestions)
         .environment(\.openSummaryTab, {
             homePath = NavigationPath()
             selectedTab = .summary
         })
+        .environment(\.openPendingTab, {
+            var path = NavigationPath()
+            path.append(HomeDestination.pending)
+            homePath = path
+            selectedTab = .home
+        })
+        .environment(\.openHomeTab, {
+            homePath = NavigationPath()
+            selectedTab = .home
+        })
+        .environment(\.openReviewScope, { scope in
+            var path = NavigationPath()
+            path.append(HomeDestination.scope(scope))
+            homePath = path
+            selectedTab = .home
+        })
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
+            if phase == .inactive {
+                if suggestions.isScanning { PhotoSuggestionForegroundGrace.begin(service: suggestions) }
+            } else if phase == .background {
                 _ = reviews.flushPendingReviewChanges()
+                suggestions.scheduleBackgroundCheck(after: suggestions.hasScanned
+                    ? PhotoSuggestionBackgroundTask.successfulScanDelay : 0)
+            } else if phase == .active {
+                PhotoSuggestionForegroundGrace.end()
+                PhotoSuggestionBackgroundTask.cancelRunning()
+                if PHPhotoLibrary.authorizationStatus(for: .readWrite) != library.authorizationStatus {
+                    Task { await library.refresh() }
+                } else if library.hasLoaded {
+                    suggestions.startIfNeeded(library: library, reviews: reviews)
+                }
+            }
+        }
+        .onChange(of: suggestions.isScanning) { _, scanning in
+            if !scanning {
+                PhotoSuggestionForegroundGrace.end()
+                // A PhotoKit refresh may arrive during a long scan. Finish
+                // that pass first, then check the newest library snapshot.
+                if scenePhase == .active && library.hasLoaded {
+                    suggestions.startIfNeeded(library: library, reviews: reviews)
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in
+            if scenePhase == .active && library.hasLoaded {
+                suggestions.startIfNeeded(library: library, reviews: reviews)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
+            if scenePhase == .active && library.hasLoaded {
+                suggestions.startIfNeeded(library: library, reviews: reviews)
             }
         }
         .tint(.primary)
@@ -68,6 +126,9 @@ struct RootView: View {
                     onOpenSummary: {
                         homePath = NavigationPath()
                         selectedTab = .summary
+                    },
+                    onOpenSuggestions: {
+                        selectedTab = .suggestions
                     }
                 )
             }
@@ -77,7 +138,7 @@ struct RootView: View {
             .tag(RootTab.home)
 
             NavigationStack {
-                PendingDecisionsView(
+                SuggestionsView(
                     library: library,
                     reviews: reviews,
                     sizes: sizes,
@@ -86,9 +147,9 @@ struct RootView: View {
                 )
             }
             .tabItem {
-                Label(String(localized: "待决定"), systemImage: "questionmark.circle")
+                Label(String(localized: "清理建议"), systemImage: "wand.and.stars")
             }
-            .tag(RootTab.pending)
+            .tag(RootTab.suggestions)
 
             NavigationStack {
                 ReviewSummaryView(
@@ -140,7 +201,7 @@ struct RootView: View {
 
 private enum RootTab: Hashable {
     case home
-    case pending
+    case suggestions
     case summary
     case settings
 }
@@ -149,7 +210,31 @@ private struct OpenSummaryTabKey: EnvironmentKey {
     static var defaultValue: (@MainActor () -> Void)? { nil }
 }
 
+private struct OpenPendingTabKey: EnvironmentKey {
+    static var defaultValue: (@MainActor () -> Void)? { nil }
+}
+
+private struct OpenHomeTabKey: EnvironmentKey {
+    static var defaultValue: (@MainActor () -> Void)? { nil }
+}
+
+private struct OpenReviewScopeKey: EnvironmentKey {
+    static var defaultValue: (@MainActor (LibraryScope) -> Void)? { nil }
+}
+
 extension EnvironmentValues {
+    var openHomeTab: (@MainActor () -> Void)? {
+        get { self[OpenHomeTabKey.self] }
+        set { self[OpenHomeTabKey.self] = newValue }
+    }
+    var openReviewScope: (@MainActor (LibraryScope) -> Void)? {
+        get { self[OpenReviewScopeKey.self] }
+        set { self[OpenReviewScopeKey.self] = newValue }
+    }
+    var openPendingTab: (@MainActor () -> Void)? {
+        get { self[OpenPendingTabKey.self] }
+        set { self[OpenPendingTabKey.self] = newValue }
+    }
     var openSummaryTab: (@MainActor () -> Void)? {
         get { self[OpenSummaryTabKey.self] }
         set { self[OpenSummaryTabKey.self] = newValue }

@@ -171,6 +171,38 @@ final class ReviewStore {
         return true
     }
 
+    /// A comparison group is one persisted transaction and one undo entry.
+    /// Existing keep decisions are protected even if the selection is stale.
+    @discardableResult
+    func decideGroup(_ identifiers: [String], keeping: Set<String>) -> Bool {
+        decideGroup(identifiers, keeping: keeping, allowsEmptyKeep: false)
+    }
+
+    /// Explicit "keep none" action. Photos are only staged for deletion and
+    /// existing keep decisions remain protected; the whole group is undoable.
+    @discardableResult
+    func stageGroupForDeletion(_ identifiers: [String]) -> Bool {
+        decideGroup(identifiers, keeping: [], allowsEmptyKeep: true)
+    }
+
+    private func decideGroup(_ identifiers: [String], keeping: Set<String>, allowsEmptyKeep: Bool) -> Bool {
+        let unique = Array(Set(identifiers)).sorted()
+        guard !unique.isEmpty, (allowsEmptyKeep || !keeping.isEmpty), keeping.isSubset(of: Set(unique)),
+              interactiveReviewCount == 0 else { return false }
+        let changes = unique.filter { records[$0]?.decision != .keep }
+            .map { UndoChange(assetIdentifier: $0, previous: snapshot(for: $0)) }
+        guard !changes.isEmpty else { return false }
+        for identifier in changes.map(\.assetIdentifier) {
+            let before = snapshot(for: identifier)
+            let decision: ReviewDecision = keeping.contains(identifier) || before?.decision == .keep ? .keep : .delete
+            assign(identifier, snapshot: Snapshot(decision: decision, pendingFavorite: decision == .keep && (before?.pendingFavorite ?? false)))
+        }
+        guard saveOrRollback() else { return false }
+        history.append(UndoEntry(changes: changes))
+        publishDecisionChange()
+        return true
+    }
+
     @discardableResult
     func stageFavorite(for assetIdentifier: String, alreadyFavorite: Bool) -> Bool {
         let before = snapshot(for: assetIdentifier)
@@ -186,14 +218,20 @@ final class ReviewStore {
     func undo() -> Bool {
         guard let entry = history.popLast() else { return false }
         let success: Bool
-        if let previous = entry.previous {
+        if entry.changes.count > 1 {
+            guard interactiveReviewCount == 0 else { history.append(entry); return false }
+            for change in entry.changes { assign(change.assetIdentifier, snapshot: change.previous) }
+            success = saveOrRollback()
+        } else if let change = entry.changes.first, let previous = change.previous {
             success = write(
-                assetIdentifier: entry.assetIdentifier,
+                assetIdentifier: change.assetIdentifier,
                 decision: previous.decision,
                 pendingFavorite: previous.pendingFavorite
             )
+        } else if let change = entry.changes.first {
+            success = remove(change.assetIdentifier)
         } else {
-            success = remove(entry.assetIdentifier)
+            success = false
         }
         if !success { history.append(entry) }
         publishDecisionChange()
@@ -326,6 +364,18 @@ final class ReviewStore {
         return Snapshot(decision: record.decision, pendingFavorite: record.pendingFavorite)
     }
 
+    private func assign(_ identifier: String, snapshot: Snapshot?) {
+        guard let snapshot else {
+            if let record = records.removeValue(forKey: identifier) { context.delete(record) }
+            return
+        }
+        let record = records[identifier] ?? ReviewRecord(assetIdentifier: identifier, decision: snapshot.decision)
+        if records[identifier] == nil { context.insert(record); records[identifier] = record }
+        record.decision = snapshot.decision
+        record.pendingFavorite = snapshot.pendingFavorite
+        record.updatedAt = .now
+    }
+
     private func write(assetIdentifier: String, decision: ReviewDecision, pendingFavorite: Bool) -> Bool {
         let record: ReviewRecord
         if let existing = records[assetIdentifier] {
@@ -443,10 +493,20 @@ final class ReviewStore {
         let pendingFavorite: Bool
     }
 
-    private struct UndoEntry {
+    private struct UndoChange {
         let assetIdentifier: String
         let previous: Snapshot?
+    }
+
+    private struct UndoEntry {
+        let changes: [UndoChange]
         let token = UUID()
+
+        init(assetIdentifier: String, previous: Snapshot?) {
+            changes = [UndoChange(assetIdentifier: assetIdentifier, previous: previous)]
+        }
+
+        init(changes: [UndoChange]) { self.changes = changes }
     }
 
     private struct CleanupLedger: Codable {

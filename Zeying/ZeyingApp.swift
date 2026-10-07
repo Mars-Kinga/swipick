@@ -15,7 +15,8 @@ struct ZeyingApp: App {
                     reviews: reviews,
                     sizes: appState.sizes,
                     albumService: appState.albumService,
-                    albumAssignments: albumAssignments
+                    albumAssignments: albumAssignments,
+                    suggestions: appState.suggestions
                 )
             } else {
                 ContentUnavailableView(
@@ -34,6 +35,7 @@ private final class AppState {
     let library = PhotoLibraryService()
     let albumService = PhotoAlbumService()
     let sizes = AssetSizeService()
+    let suggestions = PhotoSuggestionService()
     let reviews: ReviewStore?
     let albumAssignments: PendingAlbumAssignmentStore?
     let startupError: String?
@@ -43,8 +45,13 @@ private final class AppState {
             let container = try ModelContainer(for: ReviewRecord.self, PendingAlbumAssignment.self)
             modelContainer = container
             reviews = ReviewStore(context: container.mainContext)
-            albumAssignments = PendingAlbumAssignmentStore(context: ModelContext(container))
+            let assignments = PendingAlbumAssignmentStore(context: ModelContext(container))
+            albumAssignments = assignments
             startupError = nil
+            suggestions.setAlbumAssignments(assignments)
+            if let reviews {
+                PhotoSuggestionBackgroundTask.register(service: suggestions, library: library, reviews: reviews)
+            }
         } catch {
             modelContainer = nil
             reviews = nil

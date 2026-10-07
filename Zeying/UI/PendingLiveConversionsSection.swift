@@ -31,7 +31,12 @@ struct PendingLiveConversionsSection: View {
                     } label: {
                         HStack(spacing: 12) {
                             if let asset = previewAsset(for: record) {
-                                AssetImageView(asset: asset, library: library, contentMode: .fill)
+                                AssetImageView(
+                                    asset: asset,
+                                    library: library,
+                                    contentMode: .fill,
+                                    allowNetwork: false
+                                )
                                     .frame(width: 60, height: 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             } else {
@@ -45,11 +50,9 @@ struct PendingLiveConversionsSection: View {
                                 Text(record.creationDate.zeyingShortDate)
                                     .font(.subheadline.weight(.medium))
                                     .foregroundStyle(.primary)
-                                Text(record.phase == .preparing ? String(localized: "正在准备静态照片") :
-                                     record.phase == .originalDeleted ? String(localized: "完成本地记录") :
-                                     String(localized: "静态副本已创建，可确认删除原件"))
+                                Text(statusText(for: record))
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(statusColor(for: record))
                             }
                             Spacer()
                             Image(systemName: "chevron.right")
@@ -84,5 +87,35 @@ struct PendingLiveConversionsSection: View {
             return still
         }
         return library.asset(with: record.sourceIdentifier)
+    }
+
+    private func statusText(for record: LivePhotoConversion) -> String {
+        if record.phase == .preparing {
+            return String(localized: "正在准备静态照片")
+        }
+        if record.phase == .originalDeleted {
+            return record.verification == .verified
+                ? String(localized: "已核对，等待完成本地记录")
+                : String(localized: "本地记录待核对")
+        }
+        switch record.verification {
+        case .verified:
+            return String(localized: "静态副本已核对，可确认删除原件")
+        case .pending:
+            return String(localized: "静态副本等待核对")
+        case .failed:
+            return String(localized: "静态副本核对失败，请重试")
+        }
+    }
+
+    private func statusColor(for record: LivePhotoConversion) -> Color {
+        switch record.verification {
+        case .verified:
+            return .green
+        case .failed:
+            return .orange
+        case .pending:
+            return .secondary
+        }
     }
 }

@@ -394,7 +394,7 @@ final class PhotoAlbumService {
                 let identifiers = Set(group.map(\.assetIdentifier))
                 let alreadyApplied = Set(applied)
                 failed.append(contentsOf: identifiers.subtracting(alreadyApplied))
-                messages.append(error.localizedDescription)
+                messages.append(PhotosFailureMessage.message(for: error))
             }
         }
 

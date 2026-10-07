@@ -1,5 +1,6 @@
 import Photos
 import SwiftUI
+import UIKit
 
 struct ReviewSummaryView: View {
     let library: PhotoLibraryService
@@ -15,6 +16,7 @@ struct ReviewSummaryView: View {
     @State private var showingUnavailableCleanupConfirmation = false
     @State private var showingAlbumConfirmation = false
     @State private var operationError: String?
+    @State private var previewSelection: SummaryPreviewSelection?
 
     private var favoriteIDs: [String] {
         reviews.pendingFavoriteIdentifiers
@@ -27,13 +29,7 @@ struct ReviewSummaryView: View {
     }
 
     private var unavailableIDs: [String] {
-        guard library.hasLoaded else { return [] }
-        return reviews.unavailableIdentifiers(
-            among: Set(library.assets.map(\.localIdentifier))
-        ).filter { identifier in
-            library.asset(with: identifier) == nil &&
-                (reviews.decision(for: identifier) == .delete || reviews.isPendingFavorite(identifier))
-        }
+        reviews.unavailableIdentifiers(among: Set(library.assets.map(\.localIdentifier)))
     }
 
     private var albumItems: [PendingAlbumAssignment] {
@@ -41,7 +37,6 @@ struct ReviewSummaryView: View {
     }
 
     private var unavailableAlbumItems: [PendingAlbumAssignment] {
-        guard library.hasLoaded else { return [] }
         let accessible = Set(library.assets.map(\.localIdentifier))
         return albumAssignments.assignments.filter { !accessible.contains($0.assetIdentifier) }
     }
@@ -81,40 +76,38 @@ struct ReviewSummaryView: View {
                     .zeyingGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
         }
-        .confirmationDialog(
-            String(localized: "确认收藏这些照片？"),
-            isPresented: $showingFavoriteConfirmation,
-            titleVisibility: .visible
+        .alert(
+            String(localized: "确认收藏这些项目？"),
+            isPresented: $showingFavoriteConfirmation
         ) {
-            Button(String(localized: "确认收藏 \(favoriteIDs.count) 张")) {
+            Button(String(localized: "确认收藏 \(favoriteIDs.count) 项")) {
                 Task { await commitFavorites() }
             }
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
-            Text(String(localized: "照片会同步到系统照片的“个人收藏”中，并从待收藏清单移除。"))
+            Text(String(localized: "所选项目会同步到系统照片的“个人收藏”中，并从待收藏清单移除。"))
         }
         .alert(
-            String(localized: "确认删除这些照片？"),
+            String(localized: "确认删除这些项目？"),
             isPresented: $showingDeleteConfirmation
         ) {
-            Button(String(localized: "删除 \(deleteIDs.count) 张"), role: .destructive) {
+            Button(String(localized: "删除 \(deleteIDs.count) 项"), role: .destructive) {
                 Task { await commitDeletes() }
             }
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
-            Text(String(localized: "照片会从系统照片图库移除，并按系统设置进入“最近删除”。"))
+            Text(String(localized: "若启用 iCloud 照片，删除会同步到同一账户的其他设备；若为共享图库，共享成员可能看到相应变化。照片通常会按系统设置进入“最近删除”，具体保留时间和恢复条件由系统决定。"))
         }
-        .confirmationDialog(
-            String(localized: "确认整理这些照片？"),
-            isPresented: $showingAlbumConfirmation,
-            titleVisibility: .visible
+        .alert(
+            String(localized: "确认加入这些相簿？"),
+            isPresented: $showingAlbumConfirmation
         ) {
-            Button(String(localized: "整理 \(albumItems.count) 张照片")) {
+            Button(String(localized: "加入相簿")) {
                 Task { await commitAlbumAssignments() }
             }
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
-            Text(String(localized: "照片会加入所选个人相簿；新相簿会在确认时创建。"))
+            Text(String(localized: "确认后，所选项目会加入对应的个人相簿。"))
         }
         .confirmationDialog(
             String(localized: "清理不可访问的本地记录？"),
@@ -132,6 +125,13 @@ struct ReviewSummaryView: View {
             Button(String(localized: "知道了")) { operationError = nil }
         } message: {
             Text(operationError ?? String(localized: "请稍后重试。"))
+        }
+        .sheet(item: $previewSelection) { selection in
+            if let asset = library.asset(with: selection.assetIdentifier) {
+                SummaryAssetPreviewSheet(asset: asset, library: library)
+            } else {
+                UnavailableSummaryPreviewSheet()
+            }
         }
     }
 
@@ -154,7 +154,7 @@ struct ReviewSummaryView: View {
                         Spacer()
                         sectionAction(
                             String(localized: "收藏"),
-                            accessibilityLabel: String(localized: "确认收藏 \(favoriteIDs.count) 张")
+                            accessibilityLabel: String(localized: "确认收藏 \(favoriteIDs.count) 项")
                         ) {
                             showingFavoriteConfirmation = true
                         }
@@ -162,7 +162,7 @@ struct ReviewSummaryView: View {
                     .zeyingAlignedGroupedSectionHeader()
                     .textCase(nil)
                 } footer: {
-                    Text(String(localized: "收藏会视为保留，不会删除照片。"))
+                    Text(String(localized: "收藏会视为保留，不会删除这些项目。"))
                 }
             }
 
@@ -203,8 +203,8 @@ struct ReviewSummaryView: View {
                         Label(String(localized: "待整理相簿"), systemImage: "rectangle.stack.badge.plus")
                         Spacer()
                         sectionAction(
-                            String(localized: "整理"),
-                            accessibilityLabel: String(localized: "确认整理 \(albumItems.count) 张照片")
+                            String(localized: "加入相簿"),
+                            accessibilityLabel: String(localized: "确认加入相簿，\(albumItems.count) 项")
                         ) {
                             showingAlbumConfirmation = true
                         }
@@ -219,9 +219,9 @@ struct ReviewSummaryView: View {
             if !unavailableIDs.isEmpty {
                 Section {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(String(localized: "有 \(unavailableIDs.count) 条本地处理记录当前无法在照片图库中找到。"))
+                        Text(String(localized: "有 \(unavailableIDs.count) 项本地处理记录当前无法在照片图库中找到。"))
                             .font(.subheadline.weight(.medium))
-                        Text(library.authorizationStatus == .limited
+                        Text(library.authorizationStatus != .authorized
                              ? String(localized: "它们可能属于尚未授权给择影的照片。调整可访问范围后，记录可能重新出现。")
                              : String(localized: "它们可能对应已被删除或移出当前图库的照片。"))
                             .font(.caption)
@@ -237,12 +237,17 @@ struct ReviewSummaryView: View {
                                 ZeyingLimitedLibraryAccess.present(using: library)
                             }
                             .buttonStyle(ZeyingGlassButtonStyle())
+                        } else {
+                            Button(String(localized: "管理照片访问权限")) {
+                                openPhotoSettings()
+                            }
+                            .buttonStyle(ZeyingGlassButtonStyle())
                         }
                     }
                     .padding(.vertical, 4)
                     .listRowBackground(Color.clear)
                 } header: {
-                    Label(String(localized: "不可访问"), systemImage: "exclamationmark.triangle")
+                    Label(String(localized: "不可访问（\(unavailableIDs.count)）"), systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                         .zeyingAlignedGroupedSectionHeader()
                 } footer: {
@@ -253,18 +258,30 @@ struct ReviewSummaryView: View {
             if !unavailableAlbumItems.isEmpty {
                 Section {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text(String(localized: "有 \(unavailableAlbumItems.count) 条相簿整理记录暂时无法访问。"))
+                        Text(String(localized: "有 \(unavailableAlbumItems.count) 项相簿整理记录暂时无法访问。"))
                             .font(.subheadline.weight(.medium))
-                        Text(library.authorizationStatus == .limited
-                             ? String(localized: "它们可能属于尚未授权给择影的照片；调整可访问范围后会重新出现。")
-                             : String(localized: "它们可能对应已被删除或移出当前图库的照片。"))
+                        Text(library.authorizationStatus != .authorized
+                             ? String(localized: "它们可能属于尚未授权给择影的项目；调整可访问范围后会重新出现。")
+                             : String(localized: "它们可能对应已被删除或移出当前图库的项目。"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
+
+                        if library.authorizationStatus == .limited {
+                            Button(String(localized: "管理可访问照片")) {
+                                ZeyingLimitedLibraryAccess.present(using: library)
+                            }
+                            .buttonStyle(ZeyingGlassButtonStyle())
+                        } else if library.authorizationStatus != .authorized {
+                            Button(String(localized: "管理照片访问权限")) {
+                                openPhotoSettings()
+                            }
+                            .buttonStyle(ZeyingGlassButtonStyle())
+                        }
                     }
                     .padding(.vertical, 4)
                     .listRowBackground(Color.clear)
                 } header: {
-                    Label(String(localized: "不可访问的相簿整理"), systemImage: "exclamationmark.triangle")
+                    Label(String(localized: "不可访问的相簿整理（\(unavailableAlbumItems.count)）"), systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                         .zeyingAlignedGroupedSectionHeader()
                 }
@@ -287,13 +304,13 @@ struct ReviewSummaryView: View {
         HStack(spacing: 6) {
             sectionAction(
                 String(localized: "恢复全部"),
-                accessibilityLabel: String(localized: "恢复全部 \(deleteIDs.count) 张待删除照片")
+                accessibilityLabel: String(localized: "恢复所有待删除项目")
             ) {
                 recoverDeletions(deleteIDs)
             }
             sectionAction(
                 String(localized: "删除全部"),
-                accessibilityLabel: String(localized: "确认删除 \(deleteIDs.count) 张")
+                accessibilityLabel: String(localized: "确认删除 \(deleteIDs.count) 项")
             ) {
                 showingDeleteConfirmation = true
             }
@@ -323,14 +340,34 @@ struct ReviewSummaryView: View {
         if let asset = library.asset(with: identifier) {
             let isDeletion = decision == .delete
             if isDeletion {
-                Button {
-                    recoverDeletions([identifier])
-                } label: {
-                    summaryAssetRowContent(asset: asset, isDeletion: true, trailingTitle: String(localized: "恢复"))
+                HStack(spacing: 10) {
+                    Button {
+                        previewSelection = SummaryPreviewSelection(assetIdentifier: identifier)
+                    } label: {
+                        summaryAssetRowContent(asset: asset, isDeletion: true, trailingTitle: nil)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .disabled(isCommitting)
+                    .accessibilityLabel(String(localized: "查看这个待删除项目的预览"))
+
+                    Button {
+                        recoverDeletions([identifier])
+                    } label: {
+                        Text(String(localized: "恢复"))
+                            .font(.caption.weight(.semibold))
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.small)
+                    .tint(.blue)
+                    .disabled(isCommitting)
+                    .accessibilityLabel(asset.mediaType == .video
+                        ? String(localized: "恢复这段待删除视频")
+                        : String(localized: "恢复这张待删除照片"))
                 }
-                .buttonStyle(.plain)
-                .disabled(isCommitting)
-                .accessibilityLabel(String(localized: "恢复这张待删除照片"))
             } else {
                 NavigationLink {
                     ReviewQueueView(
@@ -344,14 +381,19 @@ struct ReviewSummaryView: View {
                 } label: {
                     summaryAssetRowContent(asset: asset, isDeletion: false, trailingTitle: String(localized: "修改"))
                 }
-                .accessibilityLabel(String(localized: "编辑待收藏照片"))
+                .accessibilityLabel(String(localized: "编辑待收藏项目"))
             }
         }
     }
 
-    private func summaryAssetRowContent(asset: PHAsset, isDeletion: Bool, trailingTitle: String) -> some View {
+    private func summaryAssetRowContent(asset: PHAsset, isDeletion: Bool, trailingTitle: String?) -> some View {
         HStack(spacing: 12) {
-            AssetImageView(asset: asset, library: library, contentMode: .fill)
+            AssetImageView(
+                asset: asset,
+                library: library,
+                contentMode: .fill,
+                allowNetwork: false
+            )
                 .frame(width: 60, height: 60)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
@@ -367,16 +409,18 @@ struct ReviewSummaryView: View {
                 .font(.caption)
             }
             Spacer()
-            Text(trailingTitle)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(isDeletion ? Color.blue : Color.secondary)
+            if let trailingTitle {
+                Text(trailingTitle)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(isDeletion ? Color.blue : Color.secondary)
+            }
         }
         .contentShape(Rectangle())
     }
 
     private func recoverDeletions(_ identifiers: [String]) {
         guard reviews.recoverPendingDeletions(identifiers) else {
-            operationError = reviews.errorMessage ?? String(localized: "无法恢复待删除照片。")
+            operationError = reviews.errorMessage ?? String(localized: "无法恢复待删除项目。")
             showingError = true
             return
         }
@@ -396,7 +440,12 @@ struct ReviewSummaryView: View {
                 )
             } label: {
                 HStack(spacing: 12) {
-                    AssetImageView(asset: asset, library: library, contentMode: .fill)
+                    AssetImageView(
+                        asset: asset,
+                        library: library,
+                        contentMode: .fill,
+                        allowNetwork: false
+                    )
                         .frame(width: 60, height: 60)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
@@ -423,7 +472,7 @@ struct ReviewSummaryView: View {
                     Label(String(localized: "移除"), systemImage: "trash")
                 }
             }
-            .accessibilityLabel(String(localized: "编辑加入相簿 \(assignment.albumTitle) 的照片"))
+            .accessibilityLabel(String(localized: "编辑加入相簿 \(assignment.albumTitle) 的项目"))
         }
     }
 
@@ -440,7 +489,7 @@ struct ReviewSummaryView: View {
                 return
             }
         } catch {
-            operationError = error.localizedDescription
+            operationError = PhotosFailureMessage.message(for: error)
             showingError = true
         }
     }
@@ -485,13 +534,13 @@ struct ReviewSummaryView: View {
                 }
             }
             if !result.failedIdentifiers.isEmpty || result.errorMessage != nil {
-                let detail = result.errorMessage ?? String(localized: "部分照片未能加入相簿。")
-                operationError = String(localized: "已完成 \(result.appliedIdentifiers.count) 张，仍有 \(result.failedIdentifiers.count) 张待处理。\n\(detail)")
+                let detail = result.errorMessage ?? String(localized: "部分项目未能加入相簿。")
+                operationError = String(localized: "已完成 \(result.appliedIdentifiers.count) 项，仍有 \(result.failedIdentifiers.count) 项待处理。\n\(detail)")
                 showingError = true
             }
             await library.refresh()
         } catch {
-            operationError = error.localizedDescription
+            operationError = PhotosFailureMessage.message(for: error)
             showingError = true
         }
     }
@@ -517,6 +566,8 @@ struct ReviewSummaryView: View {
         )
 
         do {
+            // PhotoLibraryService preserves the PhotoKit error so cancelling
+            // the system confirmation leaves these local todos visible.
             let succeeded = try await library.delete(requestedIDs)
             let statisticsSaved = reviews.recordCommittedDeletion(
                 succeeded.compactMap { statByIdentifier[$0] }
@@ -531,7 +582,7 @@ struct ReviewSummaryView: View {
                 return
             }
             guard albumAssignments.removeApplied(succeeded) else {
-                operationError = albumAssignments.errorMessage ?? String(localized: "照片已删除，但相簿整理记录未能清除。")
+                operationError = albumAssignments.errorMessage ?? String(localized: "项目已删除，但相簿整理记录未能清除。")
                 showingError = true
                 return
             }
@@ -540,7 +591,9 @@ struct ReviewSummaryView: View {
                 showingError = true
             }
         } catch {
-            operationError = error.localizedDescription
+            operationError = isPhotoLibraryUserCancelled(error)
+                ? String(localized: "已取消删除，待删除清单已保留。")
+                : PhotosFailureMessage.message(for: error)
             showingError = true
         }
     }
@@ -560,5 +613,180 @@ struct ReviewSummaryView: View {
             showingError = true
             return
         }
+    }
+
+    private func openPhotoSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private func isPhotoLibraryUserCancelled(_ error: Error) -> Bool {
+        if let photosError = error as? PHPhotosError,
+           photosError.code == .userCancelled {
+            return true
+        }
+        return false
+    }
+}
+
+private struct SummaryPreviewSelection: Identifiable {
+    let assetIdentifier: String
+    var id: String { assetIdentifier }
+}
+
+private struct UnavailableSummaryPreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ContentUnavailableView(
+                String(localized: "项目暂时无法访问"),
+                systemImage: "photo.on.rectangle.angled",
+                description: Text(String(localized: "这条本地待办会保留；调整照片访问权限后可以再次查看。"))
+            )
+            .navigationTitle(String(localized: "媒体预览"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(String(localized: "关闭")) { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+private struct SummaryAssetPreviewSheet: View {
+    let asset: PHAsset
+    let library: PhotoLibraryService
+
+    @Environment(AppSettings.self) private var settings
+    @Environment(\.dismiss) private var dismiss
+    @State private var scale: CGFloat = 1
+    @State private var pinchStartScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var panStartOffset: CGSize = .zero
+    @State private var videoSoundEnabled = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { proxy in
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    if asset.mediaType == .video {
+                        AssetPreviewView(
+                            asset: asset,
+                            library: library,
+                            videoSoundEnabled: $videoSoundEnabled,
+                            initialPreview: library.cachedQuickPreview(for: asset),
+                            cornerRadius: 0
+                        )
+                    } else {
+                        AssetImageView(
+                            asset: asset,
+                            library: library,
+                            contentMode: .fit,
+                            allowNetwork: settings.iCloudAutoDownloadEnabled,
+                            targetSize: CGSize(width: 1_500, height: 1_500),
+                            requiresFullQuality: true
+                        )
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
+                        .simultaneousGesture(magnificationGesture)
+                        .simultaneousGesture(panGesture(in: proxy.size))
+                        .onTapGesture(count: 2) {
+                            setScale(scale > 1.01 ? 1 : 2)
+                        }
+                    }
+
+                    if asset.mediaType == .video {
+                        VStack {
+                            Spacer()
+                            Text(String(localized: "点按播放后加载视频内容；关闭可返回清单。"))
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.82))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(.black.opacity(0.45), in: Capsule())
+                                .padding(.bottom, 18)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+            }
+            .navigationTitle(String(localized: "媒体预览"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(String(localized: "关闭")) { dismiss() }
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .presentationDragIndicator(.visible)
+    }
+
+    private func setScale(_ proposed: CGFloat) {
+        let next = min(max(proposed, 1), 4)
+        let update = {
+            scale = next
+            pinchStartScale = next
+            if next <= 1.01 {
+                offset = .zero
+                panStartOffset = .zero
+            } else {
+                panStartOffset = offset
+            }
+        }
+        if reduceMotion {
+            update()
+        } else {
+            withAnimation(.snappy, update)
+        }
+    }
+
+    private var magnificationGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { value in
+                scale = min(max(pinchStartScale * value, 1), 4)
+            }
+            .onEnded { _ in
+                pinchStartScale = scale
+                if scale <= 1.01 {
+                    scale = 1
+                    offset = .zero
+                    panStartOffset = .zero
+                }
+            }
+    }
+
+    private func panGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 6)
+            .onChanged { value in
+                guard scale > 1.01 else { return }
+                offset = clampedOffset(
+                    CGSize(
+                        width: panStartOffset.width + value.translation.width,
+                        height: panStartOffset.height + value.translation.height
+                    ),
+                    in: size
+                )
+            }
+            .onEnded { _ in
+                panStartOffset = offset
+            }
+    }
+
+    private func clampedOffset(_ proposed: CGSize, in size: CGSize) -> CGSize {
+        let horizontalLimit = max(0, (scale - 1) * size.width / 2)
+        let verticalLimit = max(0, (scale - 1) * size.height / 2)
+        return CGSize(
+            width: min(max(proposed.width, -horizontalLimit), horizontalLimit),
+            height: min(max(proposed.height, -verticalLimit), verticalLimit)
+        )
     }
 }

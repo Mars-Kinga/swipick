@@ -1,0 +1,471 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>%lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 项</string>
+			<key>other</key>
+			<string>%lld 项</string>
+		</dict>
+	</dict>
+	<key>%lld 张</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张</string>
+			<key>other</key>
+			<string>%lld 张</string>
+		</dict>
+	</dict>
+	<key>%lld 张照片</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张照片</string>
+			<key>other</key>
+			<string>%lld 张照片</string>
+		</dict>
+	</dict>
+	<key>%lld 个</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 个</string>
+			<key>other</key>
+			<string>%lld 个</string>
+		</dict>
+	</dict>
+	<key>本组 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>本组 %lld 项</string>
+			<key>other</key>
+			<string>本组 %lld 项</string>
+		</dict>
+	</dict>
+	<key>本次已浏览 %lld 项。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>本次已浏览 %lld 项。</string>
+			<key>other</key>
+			<string>本次已浏览 %lld 项。</string>
+		</dict>
+	</dict>
+	<key>本组还有 %lld 项待决定。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>本组还有 %lld 项待决定。</string>
+			<key>other</key>
+			<string>本组还有 %lld 项待决定。</string>
+		</dict>
+	</dict>
+	<key>待决定 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>待决定 %lld 项</string>
+			<key>other</key>
+			<string>待决定 %lld 项</string>
+		</dict>
+	</dict>
+	<key>确认收藏 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>确认收藏 %lld 项</string>
+			<key>other</key>
+			<string>确认收藏 %lld 项</string>
+		</dict>
+	</dict>
+	<key>确认删除 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>确认删除 %lld 项</string>
+			<key>other</key>
+			<string>确认删除 %lld 项</string>
+		</dict>
+	</dict>
+	<key>删除 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>删除 %lld 项</string>
+			<key>other</key>
+			<string>删除 %lld 项</string>
+		</dict>
+	</dict>
+	<key>全部改为保留 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>全部改为保留 %lld 项</string>
+			<key>other</key>
+			<string>全部改为保留 %lld 项</string>
+		</dict>
+	</dict>
+	<key>确认加入相簿，%lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>确认加入相簿，%lld 项</string>
+			<key>other</key>
+			<string>确认加入相簿，%lld 项</string>
+		</dict>
+	</dict>
+	<key>还有 %lld 项待完成操作，可到清单继续确认。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>还有 %lld 项待完成操作，可到清单继续确认。</string>
+			<key>other</key>
+			<string>还有 %lld 项待完成操作，可到清单继续确认。</string>
+		</dict>
+	</dict>
+	<key>%lld 项待决定记录暂不可访问，记录仍保留。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 项待决定记录暂不可访问，记录仍保留。</string>
+			<key>other</key>
+			<string>%lld 项待决定记录暂不可访问，记录仍保留。</string>
+		</dict>
+	</dict>
+	<key>%lld 组建议 · %lld 张照片</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@groups@ · %2$#@photos@</string>
+		<key>groups</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 组建议</string>
+			<key>other</key>
+			<string>%lld 组建议</string>
+		</dict>
+		<key>photos</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张照片</string>
+			<key>other</key>
+			<string>%lld 张照片</string>
+		</dict>
+	</dict>
+	<key>%@ · %lld 张</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@ · %2$#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张</string>
+			<key>other</key>
+			<string>%lld 张</string>
+		</dict>
+	</dict>
+	<key>%lld 张暂无本地预览，可在下载后更新建议。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张暂无本地预览，可在下载后更新建议。</string>
+			<key>other</key>
+			<string>%lld 张暂无本地预览，可在下载后更新建议。</string>
+		</dict>
+	</dict>
+	<key>有 %lld 项本地处理记录当前无法在照片图库中找到。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>有 %lld 项本地处理记录当前无法在照片图库中找到。</string>
+			<key>other</key>
+			<string>有 %lld 项本地处理记录当前无法在照片图库中找到。</string>
+		</dict>
+	</dict>
+	<key>有 %lld 项相簿整理记录暂时无法访问。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>有 %lld 项相簿整理记录暂时无法访问。</string>
+			<key>other</key>
+			<string>有 %lld 项相簿整理记录暂时无法访问。</string>
+		</dict>
+	</dict>
+	<key>清单有 %lld 项待办</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>清单有 %lld 项待办</string>
+			<key>other</key>
+			<string>清单有 %lld 项待办</string>
+		</dict>
+	</dict>
+	<key>%lld 张暂无本地预览，仍可按月份审核，无需下载。</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%#@count@</string>
+		<key>count</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张暂无本地预览，仍可按月份审核，无需下载。</string>
+			<key>other</key>
+			<string>%lld 张暂无本地预览，仍可按月份审核，无需下载。</string>
+		</dict>
+	</dict>
+	<key>%@ · 剩余 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@ · 剩余 %2$#@items@</string>
+		<key>items</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 项</string>
+			<key>other</key>
+			<string>%lld 项</string>
+		</dict>
+	</dict>
+	<key>%@，%@，剩余 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$@，%2$@，剩余 %3$#@items@</string>
+		<key>items</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 项</string>
+			<key>other</key>
+			<string>%lld 项</string>
+		</dict>
+	</dict>
+	<key>清单有 %lld 项待办，%@</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>清单有 %1$#@items@待办，%2$@</string>
+		<key>items</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 项</string>
+			<key>other</key>
+			<string>%lld 项</string>
+		</dict>
+	</dict>
+	<key>已浏览 %lld 项，共 %lld 项</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>已浏览 %1$lld 项，共 %2$#@items@</string>
+		<key>items</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 项</string>
+			<key>other</key>
+			<string>%lld 项</string>
+		</dict>
+	</dict>
+	<key>查看清理统计，已清理 %lld 张照片、%lld 个视频，Live 转静态 %lld 张，已知资源大小 %@</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>查看清理统计，已清理 %1$#@photos@、%2$#@videos@，Live 转静态 %3$#@live@，已知资源大小 %4$@</string>
+		<key>photos</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张照片</string>
+			<key>other</key>
+			<string>%lld 张照片</string>
+		</dict>
+		<key>videos</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 个视频</string>
+			<key>other</key>
+			<string>%lld 个视频</string>
+		</dict>
+		<key>live</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>lld</string>
+			<key>one</key>
+			<string>%lld 张</string>
+			<key>other</key>
+			<string>%lld 张</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

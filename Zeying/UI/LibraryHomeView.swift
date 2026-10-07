@@ -9,6 +9,7 @@ struct LibraryHomeView: View {
     let albumService: PhotoAlbumService
     let albumAssignments: PendingAlbumAssignmentStore
     let onOpenSummary: () -> Void
+    let onOpenSuggestions: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -70,7 +71,10 @@ struct LibraryHomeView: View {
     }
 
     private var reviewedCount: Int {
-        library.assets.count - unreviewedCount
+        library.assets.filter {
+            let decision = reviews.decision(for: $0.localIdentifier)
+            return decision == .keep || decision == .delete
+        }.count
     }
 
     private var monthBuckets: [MonthBucket] {
@@ -208,6 +212,15 @@ struct LibraryHomeView: View {
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(for: HomeDestination.self) { destination in
             switch destination {
+            case .pending:
+                PendingDecisionsView(
+                    library: library,
+                    reviews: reviews,
+                    sizes: sizes,
+                    albumService: albumService,
+                    albumAssignments: albumAssignments
+                )
+                    .toolbar(.visible, for: .navigationBar)
             case .scope(let scope):
                 ReviewQueueView(
                     scope: scope,
@@ -244,6 +257,9 @@ struct LibraryHomeView: View {
                                 emptyLibraryCard
                             } else if unreviewedCount > 0 {
                                 continueCard
+                            }
+                            if pendingCount > 0 {
+                                undecidedCard
                             }
                             if pendingConfirmationCount > 0 {
                                 pendingConfirmationCard
@@ -335,23 +351,30 @@ struct LibraryHomeView: View {
             if library.hasLoaded {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
+                        Button(action: onOpenSuggestions) {
+                            Label(String(localized: "清理建议"), systemImage: "wand.and.stars")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 8)
+                                .background(RandomCleanupAccent.buttonGradient, in: Capsule())
+                                .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint(String(localized: "查找重复副本、相似照片和可集中检查的截图"))
                         if unreviewedCount > 0 {
                             NavigationLink(value: HomeDestination.scope(.random)) {
                                 Label(String(localized: "随机清理"), systemImage: "shuffle")
                                     .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 11)
-                                    .padding(.vertical, 8)
-                                    .background(RandomCleanupAccent.buttonGradient, in: Capsule())
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .zeyingGlass(in: Capsule())
+                                    .frame(minHeight: 44)
                             }
                             .buttonStyle(.plain)
                             .accessibilityHint(String(localized: "随机排列所有未处理照片，不按时间顺序"))
                         }
-                        StatPill(title: String(localized: "可访问"), value: library.assets.count, symbol: "photo.on.rectangle")
-                        StatPill(title: String(localized: "已处理"), value: reviewedCount, symbol: "checkmark.circle")
-                        if pendingCount > 0 {
-                            StatPill(title: String(localized: "待决定"), value: pendingCount, symbol: "questionmark.circle")
-                        }
+                        StatPill(title: String(localized: "已决定"), value: reviewedCount, symbol: "checkmark.circle")
                     }
                 }
                 .scrollIndicators(.hidden)
@@ -444,11 +467,16 @@ struct LibraryHomeView: View {
                     .frame(width: 34, height: 34)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "继续清理"))
+                    Text(resume.lastScope == nil ? String(localized: "开始整理") : String(localized: "继续清理"))
                         .font(.subheadline.weight(.semibold))
-                    Text(String(localized: "\(target?.title ?? String(localized: "全部照片")) · 剩余 \(target?.remaining ?? unreviewedCount) 张"))
+                    Text(String(localized: "\(target?.title ?? String(localized: "全部照片")) · 剩余 \(target?.remaining ?? unreviewedCount) 项"))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    if resume.lastScope != nil {
+                        Text(String(localized: "上次决定已保存，从未处理内容继续。"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Spacer(minLength: 8)
@@ -463,7 +491,7 @@ struct LibraryHomeView: View {
         }
         .buttonStyle(.plain)
         .zeyingGlass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .accessibilityLabel(String(localized: "继续清理\(target?.title ?? String(localized: "全部照片"))，剩余 \(target?.remaining ?? unreviewedCount) 张"))
+        .accessibilityLabel(String(localized: "\(resume.lastScope == nil ? String(localized: "开始整理") : String(localized: "继续清理"))，\(target?.title ?? String(localized: "全部照片"))，剩余 \(target?.remaining ?? unreviewedCount) 项"))
         .accessibilityHint(String(localized: "打开尚未处理的照片"))
     }
 
@@ -520,6 +548,37 @@ struct LibraryHomeView: View {
         .accessibilityHint(String(localized: "打开清单查看并确认操作"))
     }
 
+    private var undecidedCard: some View {
+        NavigationLink(value: HomeDestination.pending) {
+            HStack(alignment: .top, spacing: 16) {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .frame(width: 34, height: 34)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(String(localized: "待决定 \(pendingCount) 项"))
+                        .font(.subheadline.weight(.semibold))
+                    Text(String(localized: "逐张重新决定"))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14, height: 34)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .zeyingGlass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .accessibilityLabel(String(localized: "待决定 \(pendingCount) 项"))
+        .accessibilityHint(String(localized: "打开待决定照片并重新选择"))
+    }
+
     private var monthSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .lastTextBaseline) {
@@ -531,6 +590,7 @@ struct LibraryHomeView: View {
                             .foregroundStyle(timeGrouping == .month ? .primary : .secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(timeGrouping == .month ? [.isSelected] : [])
 
                     Text("|")
                         .foregroundStyle(.tertiary)
@@ -543,6 +603,7 @@ struct LibraryHomeView: View {
                             .foregroundStyle(timeGrouping == .year ? .primary : .secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(timeGrouping == .year ? [.isSelected] : [])
                 }
                 .font(.title3.weight(.semibold))
                 Spacer()
@@ -710,8 +771,27 @@ struct LibraryHomeView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
+                    if library.authorizationStatus == .notDetermined {
+                        Text(String(localized: "本地清晰照片会提前准备；仅存于 iCloud 的照片默认不自动下载，可在设置中开启。"))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if library.authorizationStatus == .denied {
+                        Button(String(localized: "打开系统设置")) {
+                            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                            UIApplication.shared.open(url)
+                        }
+                        .buttonStyle(ZeyingGlassButtonStyle())
+                    } else if library.authorizationStatus == .restricted {
+                        Text(String(localized: "照片访问受系统限制，请检查设备的内容与隐私访问限制。"))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                 }
+                .padding(.horizontal, 24)
 
                 if library.authorizationStatus == .notDetermined {
                     Button(String(localized: "允许访问")) {
@@ -750,7 +830,8 @@ struct LibraryHomeView: View {
     }
 }
 
-private enum HomeDestination: Hashable {
+enum HomeDestination: Hashable {
+    case pending
     case scope(LibraryScope)
 }
 
@@ -798,7 +879,7 @@ private enum RandomCleanupAccent {
     static let purple = Color(red: 0.67, green: 0.39, blue: 0.76)
 
     static let buttonGradient = LinearGradient(
-        colors: [blue, purple],
+        colors: [Color(red: 0.17, green: 0.43, blue: 0.72), Color(red: 0.54, green: 0.31, blue: 0.68)],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
@@ -879,21 +960,33 @@ private struct MonthRow: View {
         bucket.assets.filter { reviews.decision(for: $0.localIdentifier) == nil }.count
     }
 
+    private var undecided: Int {
+        bucket.assets.filter { reviews.decision(for: $0.localIdentifier) == .later }.count
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(grouping == .month ? bucket.date.zeyingMonthTitle : bucket.date.zeyingYearTitle)
                     .font(.subheadline.weight(.semibold))
-                Text(String(localized: "\(bucket.assets.count) 张照片"))
+                Text(String(localized: "\(bucket.assets.count) 项"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            Text(unreviewed == 0 ? String(localized: "已完成") : String(localized: "待处理 \(unreviewed)"))
-                .font(.caption.weight(.medium))
-                .foregroundStyle(unreviewed == 0 ? .green : .secondary)
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(unreviewed == 0
+                     ? (undecided > 0 ? String(localized: "已浏览") : String(localized: "已完成"))
+                     : String(localized: "待处理 \(unreviewed)"))
+                    .foregroundStyle(unreviewed == 0 && undecided == 0 ? .green : .secondary)
+                if undecided > 0 {
+                    Text(String(localized: "待决定 \(undecided) 项"))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption.weight(.medium))
 
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.semibold))
@@ -934,7 +1027,7 @@ private struct AlbumCard: View {
                 Text(album.title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
-                Text(String(localized: "\(album.count) 张"))
+                Text(String(localized: "\(album.count) 项"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -966,7 +1059,7 @@ private struct CategoryCard: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                Text(String(localized: "\(count) 张"))
+                Text(String(localized: "\(count) 项"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -221,6 +221,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = STY9R4LV8N;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Swipick;
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Swipick needs access to your photos so you can review them one by one and, after confirmation, add them to albums, favorite them, convert Live Photos, or delete them.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -243,6 +244,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = STY9R4LV8N;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Swipick;
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Swipick needs access to your photos so you can review them one by one and, after confirmation, add them to albums, favorite them, convert Live Photos, or delete them.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
