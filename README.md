@@ -8,9 +8,31 @@
 
 Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，把保留、待删和待决定分开，最后集中确认对系统图库的修改。项目使用 SwiftUI 构建原生界面，结合 Liquid Glass、叠放卡片和触觉反馈，探索照片整理中的效率与操作可控性。
 
-**Swift · SwiftUI · PhotoKit · SwiftData · iOS 26+**
+**Swift · SwiftUI · PhotoKit · SwiftData · Vision · CryptoKit · Swift Testing · iOS 26+**
 
 [English overview](#english-overview) · [完整使用指南](docs/USER_GUIDE.zh-CN.md)
+
+## 界面预览 · UI Preview
+
+<table>
+  <tr>
+    <th>审核首页 · Review Home</th>
+    <th>清理建议 · Cleanup Suggestions</th>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/review-home.jpg" width="280" alt="Swipick 深色模式首页，显示清理统计、继续审核和按月份整理入口"></td>
+    <td><img src="docs/screenshots/cleanup-suggestions.jpg" width="280" alt="Swipick 清理建议页，显示分类筛选、相似照片分组和开始审核按钮"></td>
+  </tr>
+</table>
+
+首页将清理进度、继续审核和时间分类集中展示；建议页将相似照片、重复副本和旧临时截图分组，并解释推荐原因。截图来自实际使用，图中的数量仅代表拍摄时的个人图库状态。
+
+## 项目亮点 · Engineering Highlights
+
+- **从产品流程到原生实现**：围绕“筛选 → 判断 → 确认”组织界面，支持手势审核、可撤销决定和跨次继续。
+- **本机图像分析**：结合 Vision 图像特征、文字识别和 CryptoKit 资源哈希生成清理建议，由用户决定最终操作。
+- **图库操作可靠性**：将本地审核记录与 PhotoKit 写入分离，为 Live Photo 转换保存恢复记录，并在删除原件前核对副本。
+- **资源与体验权衡**：按需预览、缓存与限量后台检查，避免建议扫描主动下载 iCloud 原片；提供中英文资源与行为测试。
 
 ## 从选择到确认
 
@@ -93,6 +115,6 @@ Tools/             图标生成工具
 
 **Swipick** is a personal native iOS project for reviewing photos and videos one at a time. Swipe left to queue deletion, swipe right to keep, or defer a decision for later. Review choices stay on the device; queued deletions, favorites and album assignments are confirmed before being written to the system photo library.
 
-Built with **SwiftUI, PhotoKit and SwiftData**, the app includes month and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included.
+Built with **SwiftUI, PhotoKit, SwiftData, Vision and CryptoKit**, the app includes month and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. On-device suggestions combine image features, screenshot text recognition and resource hashes to identify review candidates, while the user retains the final decision. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included.
 
 To run it, open `Zeying.xcodeproj` in an Xcode version supporting the iOS 26 SDK, select the `Zeying` scheme, and choose a simulator or your iPhone. Device installation requires configuring your development team and bundle identifier. The minimum deployment target is **iOS 26.0**. Run the included Swift Testing tests through **Product → Test** in Xcode.
