@@ -19,12 +19,12 @@ Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，
   &nbsp;
   <img src="docs/screenshots/photo-review-light.jpg" width="220" alt="Swipick 照片审核界面：相簿、媒体预览与待删、返回、待决定、收藏、保留按钮">
   &nbsp;
-  <img src="docs/screenshots/suggestions-preview-light.jpg" width="220" alt="Swipick 审核界面中的建议页截图预览与撤销操作">
+  <img src="docs/screenshots/suggestions-light.jpg" width="220" alt="Swipick 清理建议页：本机扫描进度、分类筛选、相似照片分组与继续审核入口">
 </p>
 
-<p align="center">首页 · 照片审核 · 建议页预览</p>
+<p align="center">首页 · 照片审核 · 清理建议</p>
 
-截图来自实际使用，展示浅色模式下的首页、审核操作与媒体预览；第三张展示在审核卡片中查看建议页截图的场景。图中的数量仅代表拍摄时的个人图库状态。
+截图来自实际使用，展示浅色模式下的首页、照片审核与清理建议。图中的数量仅代表拍摄时的个人图库状态。
 
 ## 项目亮点 · Engineering Highlights
 
