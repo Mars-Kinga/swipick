@@ -182,7 +182,7 @@ struct LibraryHomeView: View {
             let remaining = library.assets(in: .month(month))
                 .filter { reviews.decision(for: $0.localIdentifier) == nil }
                 .count
-            return (.month(month), month.zeyingMonthTitle, remaining)
+            return (.month(month), month.zeyingHomeMonthTitle, remaining)
         }
         guard unreviewedCount > 0 else { return nil }
         return (.all, String(localized: "全部照片"), unreviewedCount)
@@ -192,7 +192,7 @@ struct LibraryHomeView: View {
         switch scope {
         case .all: String(localized: "全部照片")
         case .random: String(localized: "随机清理")
-        case .month(let date): date.zeyingMonthTitle
+        case .month(let date): date.zeyingHomeMonthTitle
         case .year(let date): date.zeyingYearTitle
         case .album(let identifier):
             library.albums.first(where: { $0.id == identifier })?.title ?? String(localized: "相簿")
@@ -357,6 +357,7 @@ struct LibraryHomeView: View {
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 11)
                                 .padding(.vertical, 8)
+                                .frame(minHeight: 34)
                                 .background(RandomCleanupAccent.buttonGradient, in: Capsule())
                                 .frame(minHeight: 44)
                         }
@@ -368,7 +369,8 @@ struct LibraryHomeView: View {
                                     .font(.caption.weight(.semibold))
                                     .padding(.horizontal, 10)
                                     .padding(.vertical, 7)
-                                    .zeyingGlass(in: Capsule())
+                                    .frame(minHeight: 34)
+                                    .homeSurface(in: Capsule())
                                     .frame(minHeight: 44)
                             }
                             .buttonStyle(.plain)
@@ -432,10 +434,6 @@ struct LibraryHomeView: View {
                         }
                     }
                 }
-
-                Text(String(localized: "资源大小来自已知文件数据，不等于立即释放的设备空间。"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -469,14 +467,9 @@ struct LibraryHomeView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(resume.lastScope == nil ? String(localized: "开始整理") : String(localized: "继续清理"))
                         .font(.subheadline.weight(.semibold))
-                    Text(String(localized: "\(target?.title ?? String(localized: "全部照片")) · 剩余 \(target?.remaining ?? unreviewedCount) 项"))
+                    Text(target?.title ?? String(localized: "全部照片"))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    if resume.lastScope != nil {
-                        Text(String(localized: "上次决定已保存，从未处理内容继续。"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
 
                 Spacer(minLength: 8)
@@ -490,7 +483,7 @@ struct LibraryHomeView: View {
             .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
         .buttonStyle(.plain)
-        .zeyingGlass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .homeSurface(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .accessibilityLabel(String(localized: "\(resume.lastScope == nil ? String(localized: "开始整理") : String(localized: "继续清理"))，\(target?.title ?? String(localized: "全部照片"))，剩余 \(target?.remaining ?? unreviewedCount) 项"))
         .accessibilityHint(String(localized: "打开尚未处理的照片"))
     }
@@ -543,25 +536,20 @@ struct LibraryHomeView: View {
             .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
         .buttonStyle(.plain)
-        .zeyingGlass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .homeSurface(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .accessibilityLabel(String(localized: "清单有 \(pendingConfirmationCount) 项待办，\(pendingSummary)"))
         .accessibilityHint(String(localized: "打开清单查看并确认操作"))
     }
 
     private var undecidedCard: some View {
         NavigationLink(value: HomeDestination.pending) {
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .center, spacing: 16) {
                 Image(systemName: "questionmark.circle.fill")
                     .font(.system(size: 30, weight: .semibold))
                     .frame(width: 34, height: 34)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "待决定 \(pendingCount) 项"))
-                        .font(.subheadline.weight(.semibold))
-                    Text(String(localized: "逐张重新决定"))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+                Text(String(localized: "待决定 \(pendingCount) 项"))
+                    .font(.subheadline.weight(.semibold))
 
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
@@ -574,7 +562,7 @@ struct LibraryHomeView: View {
             .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
         .buttonStyle(.plain)
-        .zeyingGlass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .homeSurface(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .accessibilityLabel(String(localized: "待决定 \(pendingCount) 项"))
         .accessibilityHint(String(localized: "打开待决定照片并重新选择"))
     }
@@ -700,7 +688,8 @@ struct LibraryHomeView: View {
         let mediaCategories = availableMediaCategories
         let smartAlbums = additionalTypeAlbums
         return VStack(alignment: .leading, spacing: 14) {
-            sectionHeader(String(localized: "类型"), subtitle: String(localized: "专门处理一类内容"))
+            Text(String(localized: "类型"))
+                .font(.title3.weight(.semibold))
 
             if mediaCategories.isEmpty && smartAlbums.isEmpty {
                 Text(String(localized: "当前没有可处理的类型"))
@@ -723,7 +712,7 @@ struct LibraryHomeView: View {
                         NavigationLink(value: HomeDestination.scope(.album(album.id))) {
                             CategoryCard(
                                 title: album.title,
-                                symbol: typeSymbol(for: album.smartSubtypeRawValue),
+                                symbol: typeSymbol(for: album),
                                 count: album.count
                             )
                         }
@@ -734,20 +723,35 @@ struct LibraryHomeView: View {
         }
     }
 
-    private func typeSymbol(for subtype: Int?) -> String {
-        switch subtype {
-        case PHAssetCollectionSubtype.smartAlbumPanoramas.rawValue: "photo.on.rectangle.angled"
-        case PHAssetCollectionSubtype.smartAlbumFavorites.rawValue: "heart.fill"
-        case PHAssetCollectionSubtype.smartAlbumTimelapses.rawValue: "clock"
-        case PHAssetCollectionSubtype.smartAlbumBursts.rawValue: "square.stack"
-        case PHAssetCollectionSubtype.smartAlbumSlomoVideos.rawValue: "speedometer"
-        case PHAssetCollectionSubtype.smartAlbumDepthEffect.rawValue: "person.crop.rectangle"
-        case PHAssetCollectionSubtype.smartAlbumAnimated.rawValue: "play.rectangle"
-        case PHAssetCollectionSubtype.smartAlbumLongExposures.rawValue: "camera"
-        case PHAssetCollectionSubtype.smartAlbumRAW.rawValue: "camera.aperture"
-        case PHAssetCollectionSubtype.smartAlbumCinematic.rawValue: "film"
-        case PHAssetCollectionSubtype.smartAlbumSpatial.rawValue: "cube.transparent"
-        default: "square.stack.3d.up"
+    private func typeSymbol(for album: LibraryAlbum) -> String {
+        switch album.smartSubtypeRawValue {
+        case PHAssetCollectionSubtype.smartAlbumPanoramas.rawValue: return "pano"
+        case PHAssetCollectionSubtype.smartAlbumFavorites.rawValue: return "heart.fill"
+        case PHAssetCollectionSubtype.smartAlbumTimelapses.rawValue: return "timelapse"
+        case PHAssetCollectionSubtype.smartAlbumBursts.rawValue: return "burst"
+        case PHAssetCollectionSubtype.smartAlbumSlomoVideos.rawValue: return "slowmo"
+        case PHAssetCollectionSubtype.smartAlbumDepthEffect.rawValue: return "person.crop.rectangle"
+        case PHAssetCollectionSubtype.smartAlbumAnimated.rawValue: return "play.rectangle"
+        case PHAssetCollectionSubtype.smartAlbumLongExposures.rawValue: return "timer"
+        case PHAssetCollectionSubtype.smartAlbumRAW.rawValue: return "camera.aperture"
+        case PHAssetCollectionSubtype.smartAlbumCinematic.rawValue: return "film"
+        case PHAssetCollectionSubtype.smartAlbumSpatial.rawValue: return "cube.transparent"
+        default:
+            // Newer Photos smart albums can precede public subtype cases in the SDK.
+            // Keep their icons specific when PhotoKit only supplies a localized title.
+            if album.title.localizedStandardContains("Captured by Me") ||
+                album.title.localizedStandardContains("我拍摄") {
+                return "camera"
+            }
+            if album.title.localizedStandardContains("Dual Capture") ||
+                album.title.localizedStandardContains("双摄") {
+                return "camera.on.rectangle"
+            }
+            if album.title.localizedStandardContains("Recently Saved") ||
+                album.title.localizedStandardContains("最近保存") {
+                return "square.and.arrow.down"
+            }
+            return "square.stack.3d.up"
         }
     }
 
@@ -818,16 +822,6 @@ struct LibraryHomeView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func sectionHeader(_ title: String, subtitle: String) -> some View {
-        HStack(alignment: .lastTextBaseline) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-            Spacer()
-            Text(subtitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
 }
 
 enum HomeDestination: Hashable {
@@ -860,17 +854,48 @@ private struct StatPill: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: symbol)
-                .font(.caption.weight(.semibold))
             Text("\(value)")
-                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .monospacedDigit()
             Text(title)
-                .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .font(.caption.weight(.semibold))
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .zeyingGlass(in: Capsule())
+        .frame(minHeight: 34)
+        .homeSurface(in: Capsule())
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct HomeSurface<Outline: InsettableShape>: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    let outline: Outline
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if colorScheme == .dark {
+            content.background(Color.white.opacity(0.08), in: outline)
+        } else {
+            if #available(iOS 26.0, *) {
+                content.glassEffect(.regular, in: outline)
+            } else {
+                // Keep the flat white version for a future lower-iOS deployment target.
+                content
+                    .background(.white, in: outline)
+                    .overlay {
+                        outline
+                            .strokeBorder(Color.black.opacity(0.10), lineWidth: 0.75)
+                            .allowsHitTesting(false)
+                    }
+            }
+        }
+    }
+}
+
+private extension View {
+    func homeSurface<Outline: InsettableShape>(in outline: Outline) -> some View {
+        modifier(HomeSurface(outline: outline))
     }
 }
 
@@ -896,7 +921,7 @@ private struct CleanupTotalsCardButtonStyle: ButtonStyle {
         let outline = RoundedRectangle(cornerRadius: 22, style: .continuous)
 
         return configuration.label
-            .zeyingGlass(in: outline)
+            .homeSurface(in: outline)
             .overlay {
                 outline
                     .strokeBorder(RandomCleanupAccent.borderGradient, lineWidth: 1.6)
@@ -967,7 +992,7 @@ private struct MonthRow: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(grouping == .month ? bucket.date.zeyingMonthTitle : bucket.date.zeyingYearTitle)
+                Text(grouping == .month ? bucket.date.zeyingHomeMonthTitle : bucket.date.zeyingYearTitle)
                     .font(.subheadline.weight(.semibold))
                 Text(String(localized: "\(bucket.assets.count) 项"))
                     .font(.caption)
@@ -976,17 +1001,11 @@ private struct MonthRow: View {
 
             Spacer()
 
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(unreviewed == 0
-                     ? (undecided > 0 ? String(localized: "已浏览") : String(localized: "已完成"))
-                     : String(localized: "待处理 \(unreviewed)"))
-                    .foregroundStyle(unreviewed == 0 && undecided == 0 ? .green : .secondary)
-                if undecided > 0 {
-                    Text(String(localized: "待决定 \(undecided) 项"))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .font(.caption.weight(.medium))
+            Text(unreviewed == 0
+                 ? (undecided > 0 ? String(localized: "已浏览") : String(localized: "已完成"))
+                 : String(localized: "待处理 \(unreviewed)"))
+                .font(.caption.weight(.medium))
+                .foregroundStyle(unreviewed == 0 && undecided == 0 ? .green : .secondary)
 
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.semibold))
@@ -1013,7 +1032,14 @@ private struct AlbumCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let identifier = album.coverAssetIdentifier, let asset = library.asset(with: identifier) {
-                AssetImageView(asset: asset, library: library, contentMode: .fill)
+                AssetImageView(
+                    asset: asset,
+                    library: library,
+                    contentMode: .fill,
+                    targetSize: CGSize(width: 720, height: 720),
+                    requiresFullQuality: true,
+                    allowCloudThumbnail: true
+                )
                     .frame(height: 112)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
@@ -1051,7 +1077,7 @@ private struct CategoryCard: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
-                .font(.title3.weight(.semibold))
+                .font(.title3)
                 .frame(width: 40, height: 40)
                 .foregroundStyle(.primary)
                 .background(Color.primary.opacity(0.065), in: Circle())

@@ -10,20 +10,6 @@ struct FirstUseGuideView: View {
 
     private let steps: [GuideStep] = [
         GuideStep(
-            symbol: "icloud",
-            tint: .blue,
-            title: String(localized: "审核时显示清晰照片"),
-            intro: String(localized: "本地清晰照片会提前准备，iCloud 原片默认不自动下载。"),
-            tips: [
-                GuideTip(symbol: "photo", title: String(localized: "先看清，再决定"),
-                         detail: String(localized: "审核页不会用模糊缩略图代替清晰照片；仅存于 iCloud 的照片会显示等待提示。")),
-                GuideTip(symbol: "gearshape", title: String(localized: "需要高清时再开启"),
-                         detail: String(localized: "到“设置”开启“自动下载 iCloud 原片”，正在查看的照片才会自动加载高清内容；可能消耗流量和设备空间。")),
-                GuideTip(symbol: "play.circle", title: String(localized: "播放与导出按需加载"),
-                         detail: String(localized: "即使关闭自动下载，主动播放视频或实况、分享、转为静态照片时，仍可能下载所需内容。"))
-            ]
-        ),
-        GuideStep(
             symbol: "hand.draw",
             tint: .blue,
             title: String(localized: "三种手势，一张张选"),
@@ -70,6 +56,20 @@ struct FirstUseGuideView: View {
             ]
         ),
         GuideStep(
+            symbol: "wand.and.stars",
+            tint: .indigo,
+            title: String(localized: "清理建议"),
+            intro: String(localized: "从首页彩色按钮或底部导航进入；应用会在本机寻找值得先看的照片。"),
+            tips: [
+                GuideTip(symbol: "square.on.square", title: String(localized: "按组查看"),
+                         detail: String(localized: "相似照片、原始文件完全相同的副本，以及超过 90 天的临时截图会分组呈现。")),
+                GuideTip(symbol: "checkmark.circle", title: String(localized: "建议由你决定"),
+                         detail: String(localized: "相似组可以保留一张或多张；建议不会自动删除照片。")),
+                GuideTip(symbol: "checklist", title: String(localized: "删除仍需确认"),
+                         detail: String(localized: "未保留的照片先进入待删除清单，到“清单”确认后才删除。"))
+            ]
+        ),
+        GuideStep(
             symbol: "checklist",
             tint: .blue,
             title: String(localized: "最后到清单确认"),
@@ -83,6 +83,20 @@ struct FirstUseGuideView: View {
                          detail: String(localized: "收藏和已有相簿的整理会先暂存，再到清单分别确认。")),
                 GuideTip(symbol: "checkmark.shield", title: String(localized: "系统还会确认"),
                          detail: String(localized: "在清单批量提交删除时，iOS 会再次显示系统确认。"))
+            ]
+        ),
+        GuideStep(
+            symbol: "icloud",
+            tint: .blue,
+            title: String(localized: "iCloud 照片预览"),
+            intro: String(localized: "本地清晰照片会提前准备，iCloud 原片默认不自动下载。"),
+            tips: [
+                GuideTip(symbol: "photo", title: String(localized: "先看清，再决定"),
+                         detail: String(localized: "仅存于 iCloud 的照片会先显示设备可取得的预览，可能较模糊；看不清时先别删除。")),
+                GuideTip(symbol: "gearshape", title: String(localized: "需要高清时再开启"),
+                         detail: String(localized: "到“设置”开启“自动下载 iCloud 原片”，正在查看的照片才会自动加载高清内容；可能消耗流量和设备空间。")),
+                GuideTip(symbol: "play.circle", title: String(localized: "播放与导出按需加载"),
+                         detail: String(localized: "即使关闭自动下载，主动播放视频或实况、分享、转为静态照片时，仍可能下载所需内容。"))
             ]
         ),
         GuideStep(
@@ -104,7 +118,7 @@ struct FirstUseGuideView: View {
     ]
 
     private var guideSteps: [GuideStep] {
-        compact ? [steps[0], steps[1], steps[4], steps[3]] : steps
+        compact ? [steps[0], steps[1], steps[3], steps[4], steps[5], steps[2]] : steps
     }
 
     var body: some View {

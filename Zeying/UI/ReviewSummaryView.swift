@@ -11,6 +11,8 @@ struct ReviewSummaryView: View {
 
     @State private var showingFavoriteConfirmation = false
     @State private var showingDeleteConfirmation = false
+    @State private var requestedDeletionIDs: [String] = []
+    @State private var deleteAfterPreviewDismissal: String?
     @State private var isCommitting = false
     @State private var showingError = false
     @State private var showingUnavailableCleanupConfirmation = false
@@ -88,11 +90,14 @@ struct ReviewSummaryView: View {
             Text(String(localized: "所选项目会同步到系统照片的“个人收藏”中，并从待收藏清单移除。"))
         }
         .alert(
-            String(localized: "确认删除这些项目？"),
+            String(localized: requestedDeletionIDs.count == 1 ? "确认删除这个项目？" : "确认删除这些项目？"),
             isPresented: $showingDeleteConfirmation
         ) {
-            Button(String(localized: "删除 \(deleteIDs.count) 项"), role: .destructive) {
-                Task { await commitDeletes() }
+            Button(requestedDeletionIDs.count == 1
+                   ? String(localized: "删除这个项目")
+                   : String(localized: "删除 \(requestedDeletionIDs.count) 项"), role: .destructive) {
+                let identifiers = requestedDeletionIDs
+                Task { await commitDeletes(identifiers) }
             }
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
@@ -126,9 +131,21 @@ struct ReviewSummaryView: View {
         } message: {
             Text(operationError ?? String(localized: "请稍后重试。"))
         }
-        .sheet(item: $previewSelection) { selection in
+        .sheet(item: $previewSelection, onDismiss: {
+            if let identifier = deleteAfterPreviewDismissal {
+                deleteAfterPreviewDismissal = nil
+                requestedDeletionIDs = [identifier]
+                showingDeleteConfirmation = true
+            }
+        }) { selection in
             if let asset = library.asset(with: selection.assetIdentifier) {
-                SummaryAssetPreviewSheet(asset: asset, library: library)
+                SummaryAssetPreviewSheet(assetIDs: selection.assetIdentifiers, initialID: asset.localIdentifier, library: library) { identifier in
+                    recoverDeletions([identifier])
+                    previewSelection = nil
+                } onDelete: { identifier in
+                    deleteAfterPreviewDismissal = identifier
+                    previewSelection = nil
+                }
             } else {
                 UnavailableSummaryPreviewSheet()
             }
@@ -188,8 +205,6 @@ struct ReviewSummaryView: View {
                     }
                     .zeyingAlignedGroupedSectionHeader()
                     .textCase(nil)
-                } footer: {
-                    Text(String(localized: "提交到系统照片时，iOS 还会显示删除确认。"))
                 }
             }
 
@@ -312,6 +327,7 @@ struct ReviewSummaryView: View {
                 String(localized: "删除全部"),
                 accessibilityLabel: String(localized: "确认删除 \(deleteIDs.count) 项")
             ) {
+                requestedDeletionIDs = deleteIDs
                 showingDeleteConfirmation = true
             }
         }
@@ -342,7 +358,7 @@ struct ReviewSummaryView: View {
             if isDeletion {
                 HStack(spacing: 10) {
                     Button {
-                        previewSelection = SummaryPreviewSelection(assetIdentifier: identifier)
+                        previewSelection = SummaryPreviewSelection(assetIdentifier: identifier, assetIdentifiers: deleteIDs)
                     } label: {
                         summaryAssetRowContent(asset: asset, isDeletion: true, trailingTitle: nil)
                     }
@@ -545,8 +561,9 @@ struct ReviewSummaryView: View {
         }
     }
 
-    private func commitDeletes() async {
-        let requestedIDs = deleteIDs
+    private func commitDeletes(_ identifiers: [String]) async {
+        let pendingIDs = Set(deleteIDs)
+        let requestedIDs = Array(Set(identifiers).intersection(pendingIDs)).sorted()
         guard !requestedIDs.isEmpty else { return }
         isCommitting = true
         defer { isCommitting = false }
@@ -631,6 +648,7 @@ struct ReviewSummaryView: View {
 
 private struct SummaryPreviewSelection: Identifiable {
     let assetIdentifier: String
+    let assetIdentifiers: [String]
     var id: String { assetIdentifier }
 }
 
@@ -657,11 +675,14 @@ private struct UnavailableSummaryPreviewSheet: View {
 }
 
 private struct SummaryAssetPreviewSheet: View {
-    let asset: PHAsset
+    let assetIDs: [String]
     let library: PhotoLibraryService
+    let onRecover: (String) -> Void
+    let onDelete: (String) -> Void
 
     @Environment(AppSettings.self) private var settings
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedID: String
     @State private var scale: CGFloat = 1
     @State private var pinchStartScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -669,12 +690,21 @@ private struct SummaryAssetPreviewSheet: View {
     @State private var videoSoundEnabled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    init(assetIDs: [String], initialID: String, library: PhotoLibraryService,
+         onRecover: @escaping (String) -> Void, onDelete: @escaping (String) -> Void) {
+        self.assetIDs = assetIDs
+        self.library = library
+        self.onRecover = onRecover
+        self.onDelete = onDelete
+        _selectedID = State(initialValue: initialID)
+    }
+
     var body: some View {
         NavigationStack {
             GeometryReader { proxy in
                 ZStack {
                     Color.black.ignoresSafeArea()
-                    if asset.mediaType == .video {
+                    if let asset = library.asset(with: selectedID), asset.mediaType == .video {
                         AssetPreviewView(
                             asset: asset,
                             library: library,
@@ -682,7 +712,8 @@ private struct SummaryAssetPreviewSheet: View {
                             initialPreview: library.cachedQuickPreview(for: asset),
                             cornerRadius: 0
                         )
-                    } else {
+                        .id(asset.localIdentifier)
+                    } else if let asset = library.asset(with: selectedID) {
                         AssetImageView(
                             asset: asset,
                             library: library,
@@ -691,6 +722,7 @@ private struct SummaryAssetPreviewSheet: View {
                             targetSize: CGSize(width: 1_500, height: 1_500),
                             requiresFullQuality: true
                         )
+                        .id(asset.localIdentifier)
                         .scaleEffect(scale)
                         .offset(offset)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -702,7 +734,7 @@ private struct SummaryAssetPreviewSheet: View {
                         }
                     }
 
-                    if asset.mediaType == .video {
+                    if let asset = library.asset(with: selectedID), asset.mediaType == .video {
                         VStack {
                             Spacer()
                             Text(String(localized: "点按播放后加载视频内容；关闭可返回清单。"))
@@ -716,6 +748,41 @@ private struct SummaryAssetPreviewSheet: View {
                         .allowsHitTesting(false)
                     }
                 }
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 25).onEnded { value in
+                        guard scale <= 1.01,
+                              abs(value.translation.width) >= 70,
+                              abs(value.translation.width) > abs(value.translation.height) * 1.4 else { return }
+                        movePreview(value.translation.width < 0 ? 1 : -1)
+                    }
+                )
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                HStack(spacing: 14) {
+                    Button { onRecover(selectedID) } label: {
+                        Label(String(localized: "恢复"), systemImage: "arrow.uturn.backward")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.regular)
+                    .tint(.white)
+
+                    Button(role: .destructive) { onDelete(selectedID) } label: {
+                        Label(String(localized: "删除"), systemImage: "trash")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.regular)
+                    .tint(.red)
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 10)
+                .background(.black)
             }
             .navigationTitle(String(localized: "媒体预览"))
             .navigationBarTitleDisplayMode(.inline)
@@ -726,8 +793,44 @@ private struct SummaryAssetPreviewSheet: View {
                         .foregroundStyle(.white)
                 }
             }
+            .onChange(of: selectedID) { _, _ in
+                scale = 1
+                pinchStartScale = 1
+                offset = .zero
+                panStartOffset = .zero
+                videoSoundEnabled = false
+            }
+            .task(id: selectedID, priority: .utility) {
+                await prefetchAdjacentPreviews()
+            }
         }
         .presentationDragIndicator(.visible)
+    }
+
+    private func movePreview(_ direction: Int) {
+        guard let current = assetIDs.firstIndex(of: selectedID) else { return }
+        var next = current + direction
+        while assetIDs.indices.contains(next) {
+            let identifier = assetIDs[next]
+            if library.asset(with: identifier) != nil {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    selectedID = identifier
+                }
+                if settings.hapticsEnabled { UISelectionFeedbackGenerator().selectionChanged() }
+                return
+            }
+            next += direction
+        }
+    }
+
+    private func prefetchAdjacentPreviews() async {
+        guard let current = assetIDs.firstIndex(of: selectedID) else { return }
+        for next in [current + 1, current - 1] where assetIDs.indices.contains(next) {
+            guard !Task.isCancelled else { return }
+            if let asset = library.asset(with: assetIDs[next]), asset.mediaType == .image {
+                _ = await library.prepareReviewPreview(for: asset)
+            }
+        }
     }
 
     private func setScale(_ proposed: CGFloat) {

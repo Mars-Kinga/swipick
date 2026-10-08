@@ -39,6 +39,7 @@ struct ReviewQueueView: View {
     @State private var swipeAxis: ReviewSwipeAxis?
     @State private var cardWidth: CGFloat = 320
     @State private var cardHeight: CGFloat = 480
+    @State private var cardAreaWidth: CGFloat = 360
     @State private var cardAreaHeight: CGFloat = 600
     @State private var videoCardFrame: CGRect = .zero
     @State private var actionHistory: [QueueAction] = []
@@ -645,6 +646,7 @@ struct ReviewQueueView: View {
                 .onAppear {
                     cardWidth = foregroundSize.width
                     cardHeight = foregroundSize.height
+                    cardAreaWidth = proxy.size.width
                     cardAreaHeight = proxy.size.height
                     videoCardFrame = foregroundFrame
                 }
@@ -657,6 +659,9 @@ struct ReviewQueueView: View {
                 }
                 .onChange(of: proxy.size.height) { _, height in
                     cardAreaHeight = height
+                }
+                .onChange(of: proxy.size.width) { _, width in
+                    cardAreaWidth = width
                 }
             }
             .frame(height: dynamicTypeSize.isAccessibilitySize ? 260 : nil)
@@ -929,7 +934,7 @@ struct ReviewQueueView: View {
 
     private var cardRotationAngle: Double {
         guard cardWidth > 0 else { return 0 }
-        return Double(dragOffset / cardWidth) * 14
+        return min(max(Double(dragOffset / cardWidth) * 14, -14), 14)
     }
 
     private var progressHeader: some View {
@@ -1905,19 +1910,20 @@ struct ReviewQueueView: View {
         isTransitioning = true
         let transitionID = UUID()
         activeTransitionID = transitionID
-        withAnimation(.easeOut(duration: 0.16)) {
+        withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
             if decision == .later {
                 let exitDistance = max((cardAreaHeight + cardHeight) / 2 + 120, 360)
                 downwardOffset = max(downwardOffset + 160, exitDistance)
             } else {
                 let direction: CGFloat = decision == .delete ? -1 : 1
-                let exitDistance = max(cardWidth + 120, 360)
+                // The offset is rotated with the card. A tall portrait card
+                // needs more travel than its width to clear the screen edge.
+                let angle = CGFloat(14) * .pi / 180
+                let rotatedHalfWidth = (cardWidth * cos(angle) + cardHeight * sin(angle)) / 2
+                let exitDistance = (cardAreaWidth / 2 + rotatedHalfWidth + 32) / cos(angle)
                 dragOffset = direction * max(abs(dragOffset) + 160, exitDistance)
             }
-        }
-
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 170_000_000)
+        } completion: {
             guard activeTransitionID == transitionID else { return }
             guard commitBeforeAdvance?() ?? true else {
                 activeTransitionID = nil

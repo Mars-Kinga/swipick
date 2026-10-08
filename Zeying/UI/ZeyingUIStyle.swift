@@ -161,6 +161,13 @@ extension Date {
         formatted(.dateTime.year().month(.wide).locale(zeyingDisplayLocale))
     }
 
+    var zeyingHomeMonthTitle: String {
+        if Bundle.main.preferredLocalizations.first?.hasPrefix("zh") == true {
+            return zeyingMonthTitle
+        }
+        return formatted(.dateTime.month(.abbreviated).year(.twoDigits).locale(zeyingDisplayLocale))
+    }
+
     var zeyingShortDate: String {
         formatted(.dateTime.year().month().day().locale(zeyingDisplayLocale))
     }

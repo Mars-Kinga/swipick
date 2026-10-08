@@ -180,6 +180,13 @@ struct CleanupSuggestion: Identifiable, Codable, Hashable, Sendable {
 /// Groups around a seed and checks every member. This avoids merging a chain
 /// of individually similar pairs into a group whose endpoints are unrelated.
 enum SuggestionGrouping {
+    // A changed pose can move Vision's feature print farther apart even when
+    // the backdrop and capture window are the same. Use the looser threshold
+    // only after a close pair anchors the group; the all-members check then
+    // prevents chain merging across unrelated endpoints.
+    private static let nearbyPairDistance: Float = 0.22
+    private static let nearbySceneDistance: Float = 0.35
+
     static func build(
         assets: [SuggestionAsset],
         analyses: [String: SuggestionAnalysis],
@@ -250,6 +257,7 @@ enum SuggestionGrouping {
                 }
             }
             var members = [seed]
+            var memberIDs: Set<String> = [seed.id]
             for candidate in candidates.values.sorted(by: { $0.id < $1.id }) where candidate.id != seed.id && !used.contains(candidate.id) {
                 guard candidate.isLivePhoto == seed.isLivePhoto,
                       candidate.isScreenshot == seed.isScreenshot,
@@ -260,24 +268,34 @@ enum SuggestionGrouping {
                 // Two fully checked, different resources can still look alike,
                 // but remain probable copies rather than confirmed duplicates.
                 members.append(candidate)
+                memberIDs.insert(candidate.id)
             }
-            append(members, kind: .similar, reason: .possibleVersions)
-        }
-
-        for (index, seed) in ordered.enumerated() where !used.contains(seed.id) && !seed.isScreenshot {
-            guard analyses[seed.id] != nil, let seedDate = seed.createdAt else { continue }
-            var members = [seed]
-            for candidate in ordered.dropFirst(index + 1).prefix(128) {
-                guard let date = candidate.createdAt else { continue }
-                let sameBurst = seed.burstID != nil && seed.burstID == candidate.burstID
-                if date.timeIntervalSince(seedDate) > 5 * 60 && !sameBurst { break }
-                guard !used.contains(candidate.id), !candidate.isScreenshot,
-                      candidate.isLivePhoto == seed.isLivePhoto,
-                      abs(candidate.aspectRatio - seed.aspectRatio) < 0.15,
-                      members.allSatisfy({ (distance($0.id, candidate.id) ?? 1) < 0.22 }) else { continue }
-                members.append(candidate)
+            // Expand the strong visual matches with shots from the same
+            // capture window before reserving any members. Otherwise three
+            // near-identical pairs become three separate two-photo groups.
+            var addedNearbyShot = false
+            if let seedDate = seed.createdAt {
+                for pass in 0..<2 {
+                    guard pass == 0 || members.count >= 2 else { break }
+                    // The close partner may appear after other poses in time.
+                    // Revisit earlier candidates once that partner anchors a
+                    // reliable group, using the scene threshold for expansion.
+                    for candidate in ordered.dropFirst(seedIndex + 1).prefix(128) {
+                        guard let date = candidate.createdAt else { continue }
+                        let sameBurst = seed.burstID != nil && seed.burstID == candidate.burstID
+                        if date.timeIntervalSince(seedDate) > 5 * 60 && !sameBurst { break }
+                        let threshold = members.count >= 2 ? nearbySceneDistance : nearbyPairDistance
+                        guard !used.contains(candidate.id), !memberIDs.contains(candidate.id),
+                              !candidate.isScreenshot, candidate.isLivePhoto == seed.isLivePhoto,
+                              abs(candidate.aspectRatio - seed.aspectRatio) < 0.15,
+                              members.allSatisfy({ (distance($0.id, candidate.id) ?? 1) < threshold }) else { continue }
+                        members.append(candidate)
+                        memberIDs.insert(candidate.id)
+                        addedNearbyShot = true
+                    }
+                }
             }
-            append(members, kind: .similar, reason: .nearbyShots)
+            append(members, kind: .similar, reason: addedNearbyShot ? .nearbyShots : .possibleVersions)
         }
 
         let cutoff = now.addingTimeInterval(-90 * 86_400)
@@ -341,10 +359,41 @@ enum SuggestionReviewQueue {
         guard let group else { return 0 }
         return groups.firstIndex(where: { $0.id == group.id }) ?? 0
     }
+
+    static func orderedAssetIDs(in group: CleanupSuggestion) -> [String] {
+        group.assetIDs.enumerated().sorted { left, right in
+            let leftRecommended = left.element == group.recommendedKeepID
+            let rightRecommended = right.element == group.recommendedKeepID
+            if leftRecommended != rightRecommended { return leftRecommended }
+
+            let leftScore = group.aestheticScores[left.element].flatMap { $0.isFinite ? $0 : nil }
+            let rightScore = group.aestheticScores[right.element].flatMap { $0.isFinite ? $0 : nil }
+            switch (leftScore, rightScore) {
+            case let (left?, right?) where left != right: return left > right
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return left.offset < right.offset
+            }
+        }.map(\.element)
+    }
 }
 
 enum SuggestionCheckBudget {
-    static func shouldPause(lowPowerMode: Bool, thermalState: ProcessInfo.ThermalState, background: Bool = true) -> Bool {
-        thermalState == .critical || (background && (lowPowerMode || thermalState == .serious))
+    static func shouldPause(
+        lowPowerMode: Bool,
+        thermalState: ProcessInfo.ThermalState,
+        background: Bool = true,
+        isCharging: Bool = false
+    ) -> Bool {
+        thermalState == .critical ||
+            (background && (thermalState == .serious || (lowPowerMode && !isCharging)))
+    }
+}
+
+enum SuggestionScanPace {
+    static func analysisLimit(isCharging: Bool) -> Int { isCharging ? .max : 48 }
+    static func resourceLimit(isCharging: Bool) -> Int { isCharging ? .max : 4 }
+    static func itemDelay(isCharging: Bool) -> Duration {
+        isCharging ? .zero : .milliseconds(300)
     }
 }

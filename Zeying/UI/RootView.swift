@@ -1,5 +1,6 @@
 import Photos
 import SwiftUI
+import UIKit
 
 struct RootView: View {
     let library: PhotoLibraryService
@@ -12,6 +13,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedTab: RootTab = .home
+    @State private var suggestionsOpenedFromHome = false
     @State private var homePath = NavigationPath()
     @State private var settings = AppSettings()
     @State private var resume = ReviewResumeStore()
@@ -101,10 +103,22 @@ struct RootView: View {
                 }
             }
         }
+        .onChange(of: selectedTab) { previous, current in
+            if previous == .suggestions && current != .suggestions {
+                suggestionsOpenedFromHome = false
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in
             if scenePhase == .active && library.hasLoaded {
                 suggestions.startIfNeeded(library: library, reviews: reviews)
             }
+            suggestions.scheduleBackgroundCheck(after: 0)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryStateDidChangeNotification)) { _ in
+            if scenePhase == .active && library.hasLoaded {
+                suggestions.startIfNeeded(library: library, reviews: reviews)
+            }
+            suggestions.scheduleBackgroundCheck(after: 0)
         }
         .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
             if scenePhase == .active && library.hasLoaded {
@@ -128,6 +142,7 @@ struct RootView: View {
                         selectedTab = .summary
                     },
                     onOpenSuggestions: {
+                        suggestionsOpenedFromHome = true
                         selectedTab = .suggestions
                     }
                 )
@@ -143,7 +158,12 @@ struct RootView: View {
                     reviews: reviews,
                     sizes: sizes,
                     albumService: albumService,
-                    albumAssignments: albumAssignments
+                    albumAssignments: albumAssignments,
+                    showsBackToHome: suggestionsOpenedFromHome,
+                    onBackToHome: {
+                        homePath = NavigationPath()
+                        selectedTab = .home
+                    }
                 )
             }
             .tabItem {
@@ -166,7 +186,7 @@ struct RootView: View {
             .tag(RootTab.summary)
 
             NavigationStack {
-                SettingsView(library: library, reviews: reviews)
+                SettingsView(library: library)
             }
             .tabItem {
                 Label(String(localized: "设置"), systemImage: "gearshape")

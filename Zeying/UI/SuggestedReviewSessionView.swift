@@ -35,7 +35,9 @@ struct SuggestedReviewSessionView: View {
     }
 
     private var group: CleanupSuggestion? { groups.indices.contains(index) ? groups[index] : nil }
-    private var currentAssets: [PHAsset] { group?.assetIDs.compactMap { library.asset(with: $0) } ?? [] }
+    private var currentAssets: [PHAsset] {
+        group.map { SuggestionReviewQueue.orderedAssetIDs(in: $0).compactMap { library.asset(with: $0) } } ?? []
+    }
     private var protectedIDs: Set<String> {
         Set(currentAssets.filter {
             $0.isFavorite || reviews.isPendingFavorite($0.localIdentifier) || reviews.decision(for: $0.localIdentifier) == .keep ||
@@ -111,7 +113,7 @@ struct SuggestedReviewSessionView: View {
                     }
                     guard saved else { return .failed }
                     guard let nextGroup = self.group, nextGroup.kind != .screenshots,
-                          let first = nextGroup.assetIDs.first else { return .dismiss }
+                          let first = currentAssets.first?.localIdentifier else { return .dismiss }
                     return .next(first)
                 }
             }
@@ -129,16 +131,10 @@ struct SuggestedReviewSessionView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(String(localized: "第 \(index + 1) / \(groups.count) 组 · \(group.displayTitle)"))
+                        Text("\(index + 1) / \(groups.count) · \(group.displayTitle)")
                             .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
                         Text(String(localized: "选择要保留的照片"))
                             .font(.title2.weight(.bold))
-                        Text(group.reason.title)
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        if group.kind == .similar && group.recommendedKeepID == nil {
-                            Text(group.comparisonGuidance)
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
                     }
                     if currentAssets.count != group.assetIDs.count {
                         Label(String(localized: "部分照片已无法访问，请跳过本组并更新建议。"), systemImage: "exclamationmark.triangle")
@@ -256,18 +252,17 @@ struct SuggestedReviewSessionView: View {
         let selected = selectedIDs.contains(id)
         let protected = protectedIDs.contains(id)
         return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                gallery = SuggestionGallerySelection(id: id)
-            } label: {
-                AssetImageView(asset: asset, library: library, contentMode: .fit,
-                               targetSize: CGSize(width: 1_500, height: 1_500), requiresFullQuality: true)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: dynamicTypeSize.isAccessibilitySize ? 240 : 170)
-                    .background(Color(uiColor: .secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "放大查看照片 \(asset.creationDate?.zeyingDetailedDate ?? "")"))
+            AssetImageView(asset: asset, library: library, contentMode: .fit,
+                           targetSize: CGSize(width: 1_500, height: 1_500), requiresFullQuality: true)
+                .frame(maxWidth: .infinity)
+                .frame(height: dynamicTypeSize.isAccessibilitySize ? 240 : 170)
+                .background(Color(uiColor: .secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+                .onTapGesture { gallery = SuggestionGallerySelection(id: id) }
+                .accessibilityLabel(String(localized: "放大查看照片 \(asset.creationDate?.zeyingDetailedDate ?? "")"))
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { gallery = SuggestionGallerySelection(id: id) }
 
             Button {
                 if selected { keeping.remove(id) } else { keeping.insert(id) }
@@ -296,12 +291,9 @@ struct SuggestedReviewSessionView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let reason = group.recommendationDetail(for: id) {
+            if group.recommendedKeepID == id {
                 Label(String(localized: "建议保留"), systemImage: "wand.and.stars")
                     .font(.caption.weight(.semibold))
-                Text(reason)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             SuggestionFileSizeLabel(asset: asset, sizes: sizes)
         }
@@ -361,6 +353,7 @@ struct SuggestedReviewSessionView: View {
             }
             if !suggestions.skippedIDs.contains(candidate.id), !hasPendingDeletion,
                suggestions.isCurrent(candidate, library: library) {
+                gallery = nil
                 if let group { groupDrafts[group.id] = keeping }
                 withAnimation(.easeInOut(duration: 0.18)) {
                     index = target
@@ -399,19 +392,6 @@ struct SuggestedReviewSessionView: View {
 private struct SuggestionGallerySelection: Identifiable { let id: String }
 
 private extension CleanupSuggestion {
-    var comparisonGuidance: String {
-        if !aestheticEvaluationComplete {
-            return String(localized: "正在比较这组照片的画面…")
-        }
-        if aestheticScores.count == assetIDs.count {
-            return String(localized: "这组 Vision 评分接近；下方列出每张的分数，建议比较表情、清晰度和构图。")
-        }
-        if !aestheticScores.isEmpty {
-            return String(localized: "目前只取得部分照片的 Vision 评分；请查看每张清晰图，喜欢的版本可以都留。")
-        }
-        return String(localized: "这组照片暂时无法在本机取得 Vision 评分；请比较表情、清晰度和构图。")
-    }
-
     func visionScoreDescription(for assetID: String) -> String? {
         guard kind == .similar, let score = aestheticScores[assetID] else { return nil }
         let value = score.formatted(.number.precision(.fractionLength(2)))
@@ -574,7 +554,14 @@ private struct SuggestionPhotoGallery: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .accessibilityLabel(String(localized: "返回建议审核"))
+
                     Button(String(localized: "照片信息"), systemImage: "info.circle") { showingInfo = true }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -701,11 +688,11 @@ private struct SuggestionZoomPhoto: View {
             if let image { NativeSuggestionZoomView(image: image) }
             else if loaded {
                 ContentUnavailableView {
-                    Label(allowNetwork ? String(localized: "照片暂时无法加载") : String(localized: "暂无本地预览"), systemImage: "photo")
+                    Label(String(localized: "照片暂时无法加载"), systemImage: "photo")
                 } description: {
                     Text(allowNetwork
                          ? String(localized: "暂时无法加载云端内容，请检查网络后重试。本地预览仍可用于整理。")
-                         : String(localized: "当前不会下载云端原片，可关闭后继续核对其他项目。"))
+                         : String(localized: "低清预览暂时无法加载；原片不会自动下载，可关闭后继续核对其他项目。"))
                 } actions: {
                     Button(String(localized: "重试")) { retry += 1 }
                 }
@@ -715,8 +702,12 @@ private struct SuggestionZoomPhoto: View {
         .accessibilityIdentifier("suggestionPhotoViewport")
         .task(id: "\(asset.localIdentifier)-\(library.revision)-\(retry)-\(allowNetwork)") {
             loaded = false
-            image = library.cachedReviewPreview(for: asset)
-            if image != nil { loaded = true; return }
+            image = library.cachedReviewPreview(for: asset) ?? library.cachedQuickPreview(for: asset)
+            if image == nil { image = await library.quickPreview(for: asset) }
+            guard !Task.isCancelled else { return }
+            if image == nil { image = await library.cloudThumbnail(for: asset) }
+            guard !Task.isCancelled else { return }
+            if image != nil { loaded = true }
             let requestedImage = await library.requestImage(
                 for: asset,
                 targetSize: CGSize(width: 2_400, height: 2_400),

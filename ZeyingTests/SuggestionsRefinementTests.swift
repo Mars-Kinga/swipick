@@ -305,11 +305,17 @@ struct SuggestionsRefinementTests {
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .nominal))
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .fair))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .nominal))
+        #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .nominal, isCharging: true))
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .nominal, background: false))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .serious))
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .serious, background: false))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .critical))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .critical, background: false))
+        #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .critical, isCharging: true))
+        #expect(SuggestionScanPace.analysisLimit(isCharging: true) == .max)
+        #expect(SuggestionScanPace.analysisLimit(isCharging: false) == 48)
+        #expect(SuggestionScanPace.resourceLimit(isCharging: false) == 4)
+        #expect(SuggestionScanPace.itemDelay(isCharging: false) == .milliseconds(300))
     }
 
     @Test("已有相簿待办的截图不会再次进入建议队列")
@@ -332,6 +338,7 @@ struct SuggestionsRefinementTests {
         #expect(PhotoSuggestionBackgroundTask.retryDelay(success: true, energyPaused: false) == 12 * 60 * 60)
         #expect(PhotoSuggestionBackgroundTask.retryDelay(success: false, energyPaused: true) == 6 * 60 * 60)
         #expect(PhotoSuggestionBackgroundTask.retryDelay(success: false, energyPaused: false) == 15 * 60)
+        #expect(PhotoSuggestionBackgroundTask.retryDelay(success: false, energyPaused: false, isCharging: true) == 0)
     }
 
     @Test("后台资源验证跳过冷却中的失败项并继续后续副本")

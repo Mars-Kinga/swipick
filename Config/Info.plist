@@ -5,6 +5,7 @@
     <key>BGTaskSchedulerPermittedIdentifiers</key>
     <array>
         <string>com.mars.zeying.photo-suggestions</string>
+        <string>com.mars.zeying.photo-suggestions-charging</string>
     </array>
     <key>UIBackgroundModes</key>
     <array>

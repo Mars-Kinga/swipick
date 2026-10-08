@@ -72,6 +72,64 @@ struct SuggestionGroupingTests {
         #expect(groups.first?.reason == .nearbyShots)
     }
 
+    @Test("同一场景的多组相近照片合并为一组，不按两张拆分", arguments: [6, 10])
+    func nearbyPairsStayInOneGroup(count: Int) {
+        let photos = (0..<count).map { asset("selfie-\($0)", seconds: TimeInterval($0 * 12)) }
+        let analyses = Dictionary(uniqueKeysWithValues: photos.enumerated().map { index, photo in
+            (photo.id, analysis(photo, hash: UInt64(index / 2) * 0x0001_0001_0001_0001))
+        })
+        let pairByID = Dictionary(uniqueKeysWithValues: photos.enumerated().map { ($0.element.id, $0.offset / 2) })
+        let groups = SuggestionGrouping.build(assets: photos, analyses: analyses, now: now) { left, right in
+            pairByID[left] == pairByID[right] ? 0.04 : 0.31
+        }
+        #expect(groups.count == 1)
+        #expect(Set(groups.first?.assetIDs ?? []) == Set(photos.map(\.id)))
+        #expect(groups.first?.reason == .nearbyShots)
+    }
+
+    @Test("同一时段不同场景仍分组，不因时间接近而合并")
+    func nearbyButDifferentScenesStaySeparate() {
+        let photos = (0..<4).map { asset("scene-\($0)", seconds: TimeInterval($0 * 8)) }
+        let analyses = Dictionary(uniqueKeysWithValues: photos.enumerated().map { index, photo in
+            (photo.id, analysis(photo, hash: UInt64(index / 2) * 0x0001_0001_0001_0001))
+        })
+        let pairByID = Dictionary(uniqueKeysWithValues: photos.enumerated().map { ($0.element.id, $0.offset / 2) })
+        let groups = SuggestionGrouping.build(assets: photos, analyses: analyses, now: now) { left, right in
+            pairByID[left] == pairByID[right] ? 0.04 : 0.55
+        }
+        #expect(groups.count == 2)
+        #expect(groups.allSatisfy { $0.assetIDs.count == 2 })
+    }
+
+    @Test("没有可靠核心的两张照片不会仅凭宽松时段阈值成为建议")
+    func nearbyWeakPairDoesNotCreateSuggestion() {
+        let first = asset("first")
+        let second = asset("second", seconds: 8)
+        let groups = SuggestionGrouping.build(
+            assets: [first, second],
+            analyses: [first.id: analysis(first, hash: 0), second.id: analysis(second, hash: 0x0001_0001_0001_0001)],
+            now: now
+        ) { _, _ in 0.31 }
+        #expect(groups.isEmpty)
+    }
+
+    @Test("同场景照片按时间交错时，找到可靠核心后回看先前跳过的照片")
+    func interleavedPosesRejoinTheirScene() {
+        let photos = (0..<4).map { asset("pose-\($0)", seconds: TimeInterval($0 * 2)) }
+        let hashes: [UInt64] = [0, 0xffff, 0xffff_ffff, 0xffff_0000_ffff_0000]
+        let analyses = Dictionary(uniqueKeysWithValues: photos.enumerated().map { index, photo in
+            (photo.id, analysis(photo, hash: hashes[index]))
+        })
+        let closePair: Set<String> = [photos[0].id, photos[3].id]
+        let otherPair: Set<String> = [photos[1].id, photos[2].id]
+        let groups = SuggestionGrouping.build(assets: photos, analyses: analyses, now: now) { left, right in
+            let pair = Set([left, right])
+            return pair == closePair || pair == otherPair ? 0.19 : 0.29
+        }
+        #expect(groups.count == 1)
+        #expect(Set(groups.first?.assetIDs ?? []) == Set(photos.map(\.id)))
+    }
+
     @Test("Vision 给出明确美学评分时推荐较高者，不用拍摄时间代替审美")
     func aestheticsRanksSimilarPhotos() {
         let older = asset("older"), newer = asset("newer", seconds: 10)

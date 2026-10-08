@@ -442,6 +442,51 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         return await awaitPreview(networkPreviewTask(for: asset))
     }
 
+    /// Asks PhotoKit for a display-sized rendition only for the viewed image.
+    /// PhotoKit may use network data to produce it; the separate setting
+    /// controls whether we request a high-quality preview afterwards.
+    func cloudThumbnail(for asset: PHAsset) async -> UIImage? {
+        guard asset.mediaType == .image, !Task.isCancelled else { return nil }
+        if let cached = cachedQuickPreview(for: asset) ?? cachedReviewPreview(for: asset) {
+            return cached
+        }
+
+        let manager = PHImageManager.default()
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .fastFormat
+        options.resizeMode = .exact
+        options.isNetworkAccessAllowed = true
+        let request = OneShotContinuation<UIImage?>(cancellationValue: nil)
+        let thumbnail = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard request.install(continuation) else { return }
+                let requestID = manager.requestImage(
+                    for: asset,
+                    targetSize: CGSize(width: 640, height: 640),
+                    contentMode: .aspectFit,
+                    options: options
+                ) { image, info in
+                    if (info?[PHImageCancelledKey] as? Bool) == true || info?[PHImageErrorKey] != nil {
+                        request.resume(returning: nil)
+                    } else if let image {
+                        request.finishEarly(returning: image, using: manager)
+                    } else if (info?[PHImageResultIsInCloudKey] as? Bool) != true {
+                        request.resume(returning: nil)
+                    }
+                }
+                request.install(requestID: requestID, manager: manager)
+                Task {
+                    try? await Task.sleep(for: .seconds(10))
+                    request.cancel(using: manager)
+                }
+            }
+        } onCancel: {
+            request.cancel(using: manager)
+        }
+        if let thumbnail, !Task.isCancelled { cacheQuickPreview(thumbnail, for: asset) }
+        return thumbnail
+    }
+
     private func cacheQuickPreview(_ image: UIImage, for asset: PHAsset) {
         let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
         quickPreviewCache.setObject(image, forKey: asset.localIdentifier as NSString, cost: cost)

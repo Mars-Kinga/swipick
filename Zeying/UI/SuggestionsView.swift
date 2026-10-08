@@ -8,6 +8,8 @@ struct SuggestionsView: View {
     let sizes: AssetSizeService
     let albumService: PhotoAlbumService
     let albumAssignments: PendingAlbumAssignmentStore
+    let showsBackToHome: Bool
+    let onBackToHome: () -> Void
 
     @Environment(PhotoSuggestionService.self) private var suggestions
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -15,6 +17,7 @@ struct SuggestionsView: View {
     @State private var filter: SuggestionKind?
     @State private var isVisible = false
     @State private var shuffledGroupIDs: [String] = []
+    @State private var showingSuggestionInfo = false
 
     private var groups: [CleanupSuggestion] {
         let source = suggestions.availableGroups(library: library, reviews: reviews)
@@ -44,29 +47,9 @@ struct SuggestionsView: View {
                     Text(String(localized: "\(groups.count) 组建议 · \(Set(groups.flatMap { suggestions.visibleAssetIDs(in: $0, library: library, reviews: reviews) }).count) 张照片"))
                         .font(.headline)
                         .monospacedDigit()
-                    Text(categoryExplanation)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
                     scanStatus
-                    if !suggestions.hasScanned {
-                        if let date = suggestions.lastBackgroundRunDate {
-                            Text(String(format: String(localized: "最近一次后台检查：%@"),
-                                        date.formatted(date: .abbreviated, time: .shortened)))
-                                .font(.footnote).foregroundStyle(.secondary)
-                        } else if suggestions.backgroundCheckingEnabled && suggestions.backgroundScheduleError == nil {
-                            Text(String(localized: "尚无后台执行记录；iOS 会安排后台检查，打开应用时也会继续。"))
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
-                    }
-                    if let error = suggestions.backgroundScheduleError {
-                        Text(error).font(.footnote).foregroundStyle(.secondary)
-                    }
                 }
                 .padding(.vertical, 4)
-            } footer: {
-                if library.authorizationStatus == .limited {
-                    Text(String(localized: "建议仅来自当前获准访问的照片。"))
-                }
             }
 
             Section {
@@ -95,8 +78,6 @@ struct SuggestionsView: View {
                 }
             } header: {
                 if !filteredGroups.isEmpty { Text(String(localized: shuffledGroupIDs.isEmpty ? "按推荐顺序" : "随机顺序")) }
-            } footer: {
-                if !filteredGroups.isEmpty { Text(String(localized: "照片不会自动删除。待删项目会加入清单，由你集中确认。")) }
             }
 
             if let error = suggestions.errorMessage {
@@ -112,7 +93,13 @@ struct SuggestionsView: View {
         .navigationTitle(String(localized: "清理建议"))
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItemGroup(placement: .topBarLeading) {
+                if showsBackToHome {
+                    Button(action: onBackToHome) {
+                        Image(systemName: "chevron.left")
+                    }
+                    .accessibilityLabel(String(localized: "返回首页"))
+                }
                 Button {
                     withAnimation(reduceMotion ? nil : .snappy) {
                         if shuffledGroupIDs.isEmpty {
@@ -130,6 +117,9 @@ struct SuggestionsView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button(String(localized: "关于建议"), systemImage: "info.circle") {
+                        showingSuggestionInfo = true
+                    }
                     if suggestions.isScanning {
                         Button(String(localized: "暂停分析"), systemImage: "pause") { suggestions.pause(manually: true) }
                     } else {
@@ -168,6 +158,11 @@ struct SuggestionsView: View {
             if phase == .active && isVisible { suggestions.startIfNeeded(library: library, reviews: reviews) }
         }
         .onDisappear { isVisible = false }
+        .alert(String(localized: "关于建议"), isPresented: $showingSuggestionInfo) {
+            Button(String(localized: "知道了"), role: .cancel) {}
+        } message: {
+            Text(suggestionDetails)
+        }
     }
 
     private var filterPicker: some View {
@@ -250,7 +245,7 @@ struct SuggestionsView: View {
     private var categoryExplanation: String {
         switch filter {
         case nil:
-            String(localized: "相似画面、超过 90 天的临时截图，以及原始文件完全相同的副本。点分类查看筛选依据。")
+            String(localized: "相似画面、超过 90 天的临时截图，以及原始文件完全相同的副本。")
         case .similar:
             String(localized: "同一场景连拍或画面很接近的照片会放在一起。修图版和原图可以都留。")
         case .screenshots:
@@ -260,43 +255,41 @@ struct SuggestionsView: View {
         }
     }
 
+    private var suggestionDetails: String {
+        var details = [categoryExplanation]
+        if library.authorizationStatus == .limited {
+            details.append(String(localized: "建议仅来自当前获准访问的照片。"))
+        }
+        if let error = suggestions.backgroundScheduleError {
+            details.append(error)
+        }
+        return details.joined(separator: "\n\n")
+    }
+
     @ViewBuilder
     private var scanStatus: some View {
         if suggestions.isScanning {
             if let percent = suggestions.scanProgressPercent {
                 Text(String(format: String(localized: "正在检查你的照片… %d%%"), percent))
-                    .font(.footnote).foregroundStyle(.secondary).monospacedDigit()
+                    .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
             } else {
                 Text(String(localized: "正在检查你的照片…"))
-                    .font(.footnote).foregroundStyle(.secondary)
+                    .font(.subheadline).foregroundStyle(.secondary)
             }
         } else if suggestions.isManuallyPaused {
             Text(String(localized: "照片检查已暂停。"))
-                .font(.footnote).foregroundStyle(.secondary)
+                .font(.subheadline).foregroundStyle(.secondary)
             Button(String(localized: "继续分析"), systemImage: "play") {
                 suggestions.start(library: library, reviews: reviews)
             }
             .font(.subheadline)
         } else if suggestions.isEnergyPaused {
             Text(String(localized: "设备温度较高，降温后会继续检查照片。"))
-                .font(.footnote).foregroundStyle(.secondary)
-        } else if suggestions.hasScanned {
-            if filter == .screenshots {
-                Text(String(localized: "旧截图已查完；目前没有更多符合条件的内容。"))
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            if let date = suggestions.lastScanDate {
-                Text(String(localized: "更新于 \(date.formatted(date: .omitted, time: .shortened))"))
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            if suggestions.unavailableCount > 0 {
-                Text(String(localized: "\(suggestions.unavailableCount) 张暂无本地预览，仍可按月份审核，无需下载。"))
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-        } else {
+                .font(.subheadline).foregroundStyle(.secondary)
+        } else if !suggestions.hasScanned {
             if let percent = suggestions.scanProgressPercent, percent > 0 {
                 Text(String(format: String(localized: "已检查到 %d%%，等待继续。"), percent))
-                    .font(.footnote).foregroundStyle(.secondary).monospacedDigit()
+                    .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
             }
             Button(String(localized: "继续分析"), systemImage: "play") {
                 suggestions.start(library: library, reviews: reviews)
@@ -351,35 +344,55 @@ private struct SuggestionRow: View {
     private var visibleIDs: [String] { suggestions.visibleAssetIDs(in: group, library: library, reviews: reviews) }
 
     var body: some View {
+        let ids = visibleIDs
+        let thumbnailSize: CGFloat = dynamicTypeSize.isAccessibilitySize ? 72 : 64
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                ForEach(Array(visibleIDs.prefix(3)), id: \.self) { id in
-                    if let asset = library.asset(with: id) {
-                        AssetImageView(asset: asset, library: library, contentMode: .fill,
-                                       targetSize: CGSize(width: 480, height: 480),
-                                       requiresFullQuality: group.kind == .similar)
-                            .frame(width: 64, height: 64)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .accessibilityHidden(true)
+            GeometryReader { geometry in
+                let fiveTileSize = (geometry.size.width - 6 * 4) / 5
+                let maximumSlots = fiveTileSize >= (dynamicTypeSize.isAccessibilitySize ? 68 : 58) ? 5 : 4
+                let tileSize = min(thumbnailSize, (geometry.size.width - 6 * CGFloat(maximumSlots - 1)) / CGFloat(maximumSlots))
+                let photoCount = min(ids.count, ids.count > maximumSlots ? maximumSlots - 1 : maximumSlots)
+                let remainingCount = ids.count - photoCount
+                HStack(spacing: 6) {
+                    ForEach(Array(ids.prefix(photoCount)), id: \.self) { id in
+                        if let asset = library.asset(with: id) {
+                            AssetImageView(asset: asset, library: library, contentMode: .fill,
+                                           targetSize: CGSize(width: 480, height: 480),
+                                           requiresFullQuality: group.kind == .similar)
+                                .frame(width: tileSize, height: tileSize)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    if remainingCount > 0 {
+                        ZStack {
+                            Color(uiColor: .tertiarySystemFill)
+                            if let asset = library.asset(with: ids[photoCount]) {
+                                AssetImageView(asset: asset, library: library, contentMode: .fill,
+                                               targetSize: CGSize(width: 180, height: 180))
+                                    .frame(width: tileSize, height: tileSize)
+                                    .clipped()
+                                    .blur(radius: 18, opaque: true)
+                            }
+                            Color.black.opacity(0.38)
+                            Text("+\(remainingCount)")
+                                .font(.subheadline.weight(.semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(.white)
+                        }
+                        .frame(width: tileSize, height: tileSize)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .accessibilityHidden(true)
                     }
                 }
-                Spacer(minLength: 0)
             }
-            VStack(alignment: .leading, spacing: 5) {
-                Label {
-                    Text(String(localized: "\(group.displayTitle) · \(visibleIDs.count) 张"))
-                } icon: {
-                    Image(systemName: group.kind.symbol)
-                }
-                .font(.subheadline.weight(.semibold))
-                Text(group.reason.title)
-                    .font(.footnote).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let bytes = group.knownBytes {
-                    Text(String(localized: "文件总大小 \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))"))
-                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                }
+            .frame(height: thumbnailSize)
+            Label {
+                Text(String(localized: "\(group.displayTitle) · \(ids.count) 张"))
+            } icon: {
+                Image(systemName: group.kind.symbol)
             }
+            .font(.subheadline.weight(.semibold))
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)

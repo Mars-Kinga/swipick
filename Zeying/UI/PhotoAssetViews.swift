@@ -15,6 +15,7 @@ struct AssetImageView: View {
     var targetSize = CGSize(width: 480, height: 480)
     var initialPreview: UIImage?
     var requiresFullQuality = false
+    var allowCloudThumbnail = false
 
     @State private var image: UIImage?
     @State private var activeRequestIdentifier: String?
@@ -33,7 +34,8 @@ struct AssetImageView: View {
                     Image(systemName: "photo.slash")
                         .font(.title3)
                     if max(targetSize.width, targetSize.height) >= 900 {
-                        Text(allowNetwork ? String(localized: "照片暂时无法加载") : String(localized: "暂无本地预览"))
+                        Text(allowNetwork || allowCloudThumbnail
+                             ? String(localized: "照片暂时无法加载") : String(localized: "暂无本地预览"))
                             .font(.caption.weight(.medium))
                         Text(String(localized: "仍可继续作出决定"))
                             .font(.caption2)
@@ -61,7 +63,8 @@ struct AssetImageView: View {
                     .allowsHitTesting(false)
             }
         }
-        .task(id: ImageRequestIdentity(assetID: asset.localIdentifier, allowNetwork: allowNetwork, targetSize: targetSize, requiresFullQuality: requiresFullQuality)) {
+        .task(id: ImageRequestIdentity(assetID: asset.localIdentifier, allowNetwork: allowNetwork, targetSize: targetSize,
+                                       requiresFullQuality: requiresFullQuality, allowCloudThumbnail: allowCloudThumbnail)) {
             await loadImage()
         }
         .accessibilityLabel(String(localized: "照片预览"))
@@ -83,23 +86,59 @@ struct AssetImageView: View {
             return
         }
         if requiresFullQuality {
-            image = nil
-            let requestedImage: UIImage?
+            image = initialPreview ?? library.cachedQuickPreview(for: asset)
+            if image == nil {
+                let quickImage = await library.quickPreview(for: asset)
+                guard !Task.isCancelled, activeRequestIdentifier == requestIdentifier,
+                      requestGeneration == generation else { return }
+                image = quickImage
+            }
+            let localImage: UIImage?
             if usesReviewCache {
-                requestedImage = await library.prepareReviewPreview(for: asset, allowNetwork: allowNetwork)
+                localImage = await library.prepareReviewPreview(for: asset)
             } else {
-                requestedImage = await library.requestImage(
+                localImage = await library.requestImage(
                     for: asset,
                     targetSize: targetSize,
-                    allowNetwork: allowNetwork,
+                    allowNetwork: false,
                     contentMode: contentMode == .fill ? .aspectFill : .aspectFit,
                     deliveryMode: .highQualityFormat
                 )
             }
             guard !Task.isCancelled, activeRequestIdentifier == requestIdentifier,
                   requestGeneration == generation else { return }
-            image = requestedImage
-            hasFullQualityImage = requestedImage != nil
+            if let localImage {
+                image = localImage
+                hasFullQualityImage = true
+                didFinishPreviewRequest = true
+                return
+            }
+            if image == nil, allowCloudThumbnail {
+                let thumbnail = await library.cloudThumbnail(for: asset)
+                guard !Task.isCancelled, activeRequestIdentifier == requestIdentifier,
+                      requestGeneration == generation else { return }
+                image = thumbnail
+            }
+            if allowNetwork {
+                let fullImage: UIImage?
+                if usesReviewCache {
+                    fullImage = await library.prepareReviewPreview(for: asset, allowNetwork: true)
+                } else {
+                    fullImage = await library.requestImage(
+                        for: asset,
+                        targetSize: targetSize,
+                        allowNetwork: true,
+                        contentMode: contentMode == .fill ? .aspectFill : .aspectFit,
+                        deliveryMode: .highQualityFormat
+                    )
+                }
+                guard !Task.isCancelled, activeRequestIdentifier == requestIdentifier,
+                      requestGeneration == generation else { return }
+                if let fullImage {
+                    image = fullImage
+                    hasFullQualityImage = true
+                }
+            }
             didFinishPreviewRequest = true
             return
         }
@@ -154,10 +193,8 @@ struct AssetImageView: View {
         if activeRequestIdentifier == asset.localIdentifier, let image { return image }
         if requiresFullQuality, targetSize == CGSize(width: 1_500, height: 1_500),
            let cached = library.cachedReviewPreview(for: asset) { return cached }
-        if requiresFullQuality { return nil }
         if let initialPreview { return initialPreview }
-        return max(targetSize.width, targetSize.height) >= 900
-            ? library.cachedQuickPreview(for: asset) : nil
+        return library.cachedQuickPreview(for: asset)
     }
 
     private struct ImageRequestIdentity: Equatable {
@@ -165,6 +202,7 @@ struct AssetImageView: View {
         let allowNetwork: Bool
         let targetSize: CGSize
         let requiresFullQuality: Bool
+        let allowCloudThumbnail: Bool
     }
 }
 
@@ -243,7 +281,8 @@ struct AssetPreviewView: View {
                     allowNetwork: settings.iCloudAutoDownloadEnabled,
                     targetSize: CGSize(width: 1_500, height: 1_500),
                     initialPreview: initialPreview,
-                    requiresFullQuality: requiresFullQuality
+                    requiresFullQuality: requiresFullQuality,
+                    allowCloudThumbnail: true
                 )
                     .overlay {
                         if livePhotoAssetIdentifier == asset.localIdentifier,

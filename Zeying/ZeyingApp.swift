@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import UIKit
 
 @main
 @MainActor
@@ -41,6 +42,7 @@ private final class AppState {
     let startupError: String?
 
     init() {
+        UIDevice.current.isBatteryMonitoringEnabled = true
         do {
             let container = try ModelContainer(for: ReviewRecord.self, PendingAlbumAssignment.self)
             modelContainer = container

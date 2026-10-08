@@ -42,6 +42,12 @@ final class PhotoSuggestionService {
     private static let backgroundEnabledKey = "com.mars.zeying.suggestionBackgroundCheck.v1"
     private static let lastBackgroundRunKey = "com.mars.zeying.lastBackgroundSuggestionRun.v1"
 
+    var isCharging: Bool {
+        let device = UIDevice.current
+        if !device.isBatteryMonitoringEnabled { device.isBatteryMonitoringEnabled = true }
+        return device.batteryState == .charging || device.batteryState == .full
+    }
+
     init(defaults: UserDefaults = .standard, snapshotURL: URL = SuggestionGroupSnapshot.defaultURL) {
         self.defaults = defaults
         snapshotWriter = SuggestionGroupSnapshotWriter(url: snapshotURL)
@@ -136,7 +142,7 @@ final class PhotoSuggestionService {
         ) else { return }
         if SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                              thermalState: ProcessInfo.processInfo.thermalState,
-                                             background: false) {
+                                             background: false, isCharging: isCharging) {
             isEnergyPaused = true
             scheduleBackgroundCheck()
             return
@@ -189,7 +195,7 @@ final class PhotoSuggestionService {
         hasScanned = false
         isEnergyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                          thermalState: ProcessInfo.processInfo.thermalState,
-                                                         background: background)
+                                                         background: background, isCharging: isCharging)
         guard !isEnergyPaused else { scheduleBackgroundCheck(); return }
         let descriptors = library.assets.filter { $0.mediaType == .image }.map { asset in
             let decision = reviews.decision(for: asset.localIdentifier)
@@ -211,9 +217,10 @@ final class PhotoSuggestionService {
         totalCount = descriptors.count
         checkedCount = min(checkedCount, totalCount)
         saveGroupSnapshot()
+        let charging = isCharging
         scanTask = Task(priority: background ? .background : .utility) { [weak self, analyzer] in
             let receiver = self
-            await analyzer.scan(descriptors, background: background) { update in
+            await analyzer.scan(descriptors, background: background, isCharging: charging) { update in
                 await receiver?.receive(update, generation: currentGeneration)
             }
         }
@@ -244,14 +251,22 @@ final class PhotoSuggestionService {
         guard defaults.bool(forKey: Self.backgroundEnabledKey), !isManuallyPaused else { return }
         let authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorization == .authorized || authorization == .limited else { return }
-        let energyPaused = isEnergyPaused || SuggestionCheckBudget.shouldPause(
-            lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
-            thermalState: ProcessInfo.processInfo.thermalState
+        let lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        let thermalState = ProcessInfo.processInfo.thermalState
+        let chargingDelay = SuggestionCheckBudget.shouldPause(
+            lowPowerMode: lowPowerMode,
+            thermalState: thermalState,
+            isCharging: true
+        ) ? max(delay, PhotoSuggestionBackgroundTask.energyRetryDelay) : delay
+        let batteryDelay = SuggestionCheckBudget.shouldPause(
+            lowPowerMode: lowPowerMode,
+            thermalState: thermalState,
+            isCharging: false
+        ) ? max(delay, PhotoSuggestionBackgroundTask.energyRetryDelay) : delay
+        let accepted = PhotoSuggestionBackgroundTask.schedule(
+            chargingAfter: chargingDelay,
+            batteryAfter: batteryDelay
         )
-        let effectiveDelay = energyPaused
-            ? max(delay, PhotoSuggestionBackgroundTask.energyRetryDelay)
-            : delay
-        let accepted = PhotoSuggestionBackgroundTask.schedule(after: effectiveDelay)
         backgroundScheduleError = accepted ? nil : PhotoSuggestionBackgroundTask.lastSubmissionError
     }
 
@@ -259,7 +274,8 @@ final class PhotoSuggestionService {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard backgroundCheckingEnabled, status == .authorized || status == .limited,
               !SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
-                                                 thermalState: ProcessInfo.processInfo.thermalState) else { return false }
+                                                 thermalState: ProcessInfo.processInfo.thermalState,
+                                                 isCharging: isCharging) else { return false }
         lastBackgroundRunDate = .now
         defaults.set(lastBackgroundRunDate, forKey: Self.lastBackgroundRunKey)
         await library.ensureLoaded()
@@ -406,7 +422,7 @@ struct SuggestionGroupSnapshot: Codable, Sendable {
     let groupingVersion: Int?
     let progress: SuggestionScanProgress?
 
-    static let currentGroupingVersion = 3
+    static let currentGroupingVersion = 7
 
     init(groups: [CleanupSuggestion], hasScanned: Bool, lastScanDate: Date?,
          groupingVersion: Int? = currentGroupingVersion, progress: SuggestionScanProgress? = nil) {
@@ -518,7 +534,8 @@ private actor PhotoSuggestionAnalyzer {
         return result
     }
 
-    func scan(_ assets: [SuggestionAsset], background: Bool, progress: @Sendable (SuggestionScanUpdate) async -> Void) async {
+    func scan(_ assets: [SuggestionAsset], background: Bool, isCharging: Bool,
+              progress: @Sendable (SuggestionScanUpdate) async -> Void) async {
         loadCache()
         let current = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
         analyses = analyses.filter { id, analysis in
@@ -552,8 +569,8 @@ private actor PhotoSuggestionAnalyzer {
                 analyses[asset.id]?.hasCurrentScreenshotClassification == false) {
                 let energyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                                     thermalState: ProcessInfo.processInfo.thermalState,
-                                                                    background: background)
-                if energyPaused || (background && newAnalyses >= 128) {
+                                                                    background: background, isCharging: isCharging)
+                if energyPaused || (background && newAnalyses >= SuggestionScanPace.analysisLimit(isCharging: isCharging)) {
                     saveCache(force: true)
                     await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable,
                                                         paused: true, energyPaused: energyPaused))
@@ -569,7 +586,9 @@ private actor PhotoSuggestionAnalyzer {
                                                            hasPastEvent: false, previewUnavailableAt: .now)
                 }
                 newAnalyses += 1
-                if background { try? await Task.sleep(for: .milliseconds(150)) }
+                if background && !isCharging {
+                    try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
+                }
                 checked += 1
                 let refreshGroups = checked % 48 == 0 ||
                     (asset.isScreenshot && (checked % 8 == 0 || analyses[asset.id]?.temporaryScreenshotKind != nil))
@@ -594,8 +613,8 @@ private actor PhotoSuggestionAnalyzer {
             guard !Task.isCancelled else { saveCache(force: true); return }
             let energyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                                 thermalState: ProcessInfo.processInfo.thermalState,
-                                                                background: background)
-            if energyPaused || (background && newAnalyses + newScores >= 128) {
+                                                                background: background, isCharging: isCharging)
+            if energyPaused || (background && newAnalyses + newScores >= SuggestionScanPace.analysisLimit(isCharging: isCharging)) {
                 saveCache(force: true)
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable,
                                                     paused: true, energyPaused: energyPaused))
@@ -607,7 +626,9 @@ private actor PhotoSuggestionAnalyzer {
             }
             analyses[asset.id]?.aestheticChecked = true
             newScores += 1
-            if background { try? await Task.sleep(for: .milliseconds(150)) }
+            if background && !isCharging {
+                try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
+            }
             if newScores % 4 == 0 {
                 saveCache()
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable))
@@ -635,8 +656,8 @@ private actor PhotoSuggestionAnalyzer {
             guard !Task.isCancelled else { saveCache(force: true); return }
             let energyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                                 thermalState: ProcessInfo.processInfo.thermalState,
-                                                                background: background)
-            if energyPaused || (background && verified >= 8) {
+                                                                background: background, isCharging: isCharging)
+            if energyPaused || (background && verified >= SuggestionScanPace.resourceLimit(isCharging: isCharging)) {
                 saveCache(force: true)
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable,
                                                     paused: true, energyPaused: energyPaused))
@@ -656,7 +677,9 @@ private actor PhotoSuggestionAnalyzer {
                 resourceVerificationFailures[asset.id] = .now
             }
             verified += 1
-            if background { try? await Task.sleep(for: .milliseconds(150)) }
+            if background && !isCharging {
+                try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
+            }
             if verified % 8 == 0 {
                 saveCache()
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable, verifying: true))

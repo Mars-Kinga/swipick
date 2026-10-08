@@ -229,7 +229,7 @@
 "本地清晰照片会提前准备，iCloud 原片默认不自动下载。" = "Clear local photos are prepared ahead of time. iCloud originals do not download automatically.";
 "先看清，再决定" = "See Clearly, Then Decide";
 "审核页不会用模糊缩略图代替清晰照片；仅存于 iCloud 的照片会显示等待提示。" = "Review does not substitute blurry thumbnails for clear photos. iCloud-only photos show a placeholder.";
-"默认关闭：仅存于 iCloud 的照片在审核时显示等待提示。开启后，打开当前照片才下载高清内容；不会预下载后续照片。" = "Off by default: iCloud-only photos show a placeholder in review. When enabled, opening the current photo downloads its high-quality content; later photos are not downloaded ahead of time.";
+"默认使用低清预览；云端小图可能使用网络。开启后，当前照片还会下载高清内容，不会预下载后续照片。" = "Review uses low-resolution previews by default; cloud thumbnails may use data. Turn this on for high-quality content of the current photo. Later photos are not prefetched.";
 "本地清晰照片会提前准备；仅存于 iCloud 的照片默认不自动下载，可在设置中开启。" = "Clear local photos are prepared ahead of time. iCloud-only photos do not download automatically; enable this in Settings.";
 "相簿会在清单确认后创建。" = "The album will be created when you confirm it in the list.";
 "相簿名" = "Album Name";
@@ -713,6 +713,8 @@
 "确认收藏这些项目？" = "Favorite These Items?";
 "所选项目会同步到系统照片的“个人收藏”中，并从待收藏清单移除。" = "Selected items will be added to Favorites in Photos and removed from the pending list.";
 "确认删除这些项目？" = "Delete These Items?";
+"确认删除这个项目？" = "Delete This Item?";
+"删除这个项目" = "Delete Item";
 "所选项目会加入个人相簿；新相簿会在确认时创建。" = "Selected items will be added to your albums. New albums are created when you confirm.";
 "项目暂时无法访问" = "Item Temporarily Inaccessible";
 "收藏会视为保留，不会删除这些项目。" = "Favoriting marks the items as Keep. They will not be deleted.";
@@ -733,6 +735,7 @@
 "照片操作已中断，请稍后重试。" = "The Photos operation was interrupted. Try again later.";
 "照片操作未完成。请稍后重试。" = "The Photos operation could not be completed. Try again later.";
 "当前不会下载云端原片，可关闭后继续核对其他项目。" = "Cloud originals will not be downloaded. Close to continue reviewing other items.";
+"低清预览暂时无法加载；原片不会自动下载，可关闭后继续核对其他项目。" = "The small preview could not load. The original will not download automatically; close this view to review other items.";
 "若启用 iCloud 照片，删除会同步到同一账户的其他设备；若为共享图库，共享成员可能看到相应变化。照片通常会按系统设置进入“最近删除”，具体保留时间和恢复条件由系统决定。" = "If iCloud Photos is enabled, deletion syncs to other devices using the same account. Shared Library participants may see the change. Items normally move to Recently Deleted; retention and recovery depend on Photos settings.";
 "有 %lld 项本地处理记录当前无法在照片图库中找到。" = "%lld saved review records are currently inaccessible in Photos.";
 "有 %lld 项相簿整理记录暂时无法访问。" = "%lld pending album changes are temporarily inaccessible.";
@@ -830,3 +833,15 @@
 "返回主页" = "Back to Home";
 "打开下一组 %@" = "Open next group: %@";
 "确认后，所选项目会加入对应的个人相簿。" = "The selected items will be added to their chosen albums after you confirm.";
+"返回建议审核" = "Back to Suggestion Review";
+"从首页彩色按钮或底部导航进入；应用会在本机寻找值得先看的照片。" = "Open Suggestions from the colorful Home button or bottom tab. The app looks for photos worth reviewing on this device.";
+"按组查看" = "Review in Groups";
+"相似照片、原始文件完全相同的副本，以及超过 90 天的临时截图会分组呈现。" = "Similar photos, copies with identical original files, and temporary screenshots older than 90 days appear in groups.";
+"建议由你决定" = "You Decide";
+"相似组可以保留一张或多张；建议不会自动删除照片。" = "Keep one or several photos from a similar group. Suggestions never delete photos automatically.";
+"删除仍需确认" = "Confirm Before Deleting";
+"未保留的照片先进入待删除清单，到“清单”确认后才删除。" = "Photos you don't keep first go to the deletion list. They are deleted only after you confirm in the List.";
+"仅存于 iCloud 的照片会先显示设备可取得的预览，可能较模糊；看不清时先别删除。" = "Cloud-only photos show any preview available on your device. It may be blurry; if you cannot tell what is shown, do not delete it yet.";
+"iCloud 照片预览" = "iCloud Photo Previews";
+"关于建议" = "About Suggestions";
+"相似画面、超过 90 天的临时截图，以及原始文件完全相同的副本。" = "Similar scenes, temporary screenshots over 90 days old, and files with identical originals.";

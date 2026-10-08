@@ -5,6 +5,20 @@ import Testing
 
 @MainActor
 struct SuggestedReviewTests {
+    @Test("推荐照片置顶，其余按 Vision 分数降序，缺失分数的照片排在最后")
+    func reviewPhotosShowRecommendationBeforeScoreOrder() {
+        var group = CleanupSuggestion(
+            id: "scene", kind: .similar, reason: .nearbyShots,
+            assetIDs: ["a", "b", "c", "d", "e"], recommendedKeepID: "d",
+            protectedIDs: [], knownBytes: nil, newestDate: nil
+        )
+        group.aestheticScores = ["a": 0.59, "b": 0.65, "c": 0.65, "d": 0.40]
+        #expect(SuggestionReviewQueue.orderedAssetIDs(in: group) == ["d", "b", "c", "a", "e"])
+
+        group.recommendedKeepID = nil
+        #expect(SuggestionReviewQueue.orderedAssetIDs(in: group) == ["b", "c", "a", "d", "e"])
+    }
+
     @Test("推荐计数在英文中正确处理多个参数与单复数")
     func suggestionCountsUseEnglishPluralRules() throws {
         let path = try #require(Bundle.main.path(forResource: "en", ofType: "lproj"))
