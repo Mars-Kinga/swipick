@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AlbumPickerSheet: View {
     let albumService: PhotoAlbumService
+    let libraryRevision: Int
     let onSelect: (PhotoAlbumSelection) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -10,7 +11,9 @@ struct AlbumPickerSheet: View {
 
     private var filteredAlbums: [PhotoAlbumOption] {
         let search = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return albumService.albums.filter { search.isEmpty || $0.title.localizedStandardContains(search) }
+        return albumService.frequentlyUsedFirst.filter {
+            search.isEmpty || $0.title.localizedStandardContains(search)
+        }
     }
 
     var body: some View {
@@ -88,7 +91,7 @@ struct AlbumPickerSheet: View {
                 }
             }
             .task {
-                albumService.refresh()
+                albumService.refreshIfNeeded(libraryRevision: libraryRevision)
             }
         }
         .presentationDetents([.medium, .large])

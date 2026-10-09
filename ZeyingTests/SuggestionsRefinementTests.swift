@@ -143,6 +143,60 @@ struct SuggestionsRefinementTests {
         #expect(recovered["good"]?.checkedResources == false)
     }
 
+    @Test("旧分析缓存逐条迁移，保留特征数据并移除旧文件")
+    func analysisCacheMigrationPreservesResults() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "analysis-migration-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacyURL = directory.appending(path: "analysis-v1.json")
+        let databaseURL = directory.appending(path: "analysis-v2.sqlite")
+        let first = screenshot("first", age: 120 * 86_400)
+        let second = screenshot("second", age: 121 * 86_400)
+        let feature = Data((0..<32_768).map { UInt8(truncatingIfNeeded: $0) })
+        let analyses = [
+            first.id: SuggestionAnalysis(asset: first, differenceHash: UInt64.max,
+                                         featurePrint: feature, hasPastEvent: true),
+            second.id: SuggestionAnalysis(asset: second, differenceHash: 123,
+                                          featurePrint: feature, hasPastEvent: false)
+        ]
+        try JSONEncoder().encode(analyses).write(to: legacyURL)
+        let legacyBytes = try #require((FileManager.default.attributesOfItem(atPath: legacyURL.path)[.size] as? NSNumber)?.intValue)
+
+        let migrated = try SuggestionAnalysisStore(url: databaseURL, legacyURL: legacyURL).loadMigratingLegacy()
+        #expect(migrated.count == 2)
+        #expect(migrated[first.id]?.differenceHash == UInt64.max)
+        #expect(migrated[first.id]?.featurePrint == feature)
+        #expect(!FileManager.default.fileExists(atPath: legacyURL.path))
+        let databaseBytes = try #require((FileManager.default.attributesOfItem(atPath: databaseURL.path)[.size] as? NSNumber)?.intValue)
+        #expect(databaseBytes < legacyBytes)
+
+        let reopened = try SuggestionAnalysisStore(url: databaseURL, legacyURL: legacyURL).loadMigratingLegacy()
+        #expect(reopened.count == 2)
+        #expect(reopened[second.id]?.featurePrint == feature)
+    }
+
+    @Test("分析缓存只改动指定照片，其他结果在重开后仍保留")
+    func analysisCacheUpdatesIndividualRows() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "analysis-updates-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appending(path: "analysis-v2.sqlite")
+        let legacyURL = directory.appending(path: "analysis-v1.json")
+        let first = screenshot("first", age: 120 * 86_400)
+        let second = screenshot("second", age: 121 * 86_400)
+        let third = screenshot("third", age: 122 * 86_400)
+        let store = try SuggestionAnalysisStore(url: databaseURL, legacyURL: legacyURL)
+        try store.apply(upserts: [first.id: analysis(first), second.id: analysis(second)], removals: [])
+        var changed = analysis(first)
+        changed.resourceDigest = "checked"
+        try store.apply(upserts: [first.id: changed, third.id: analysis(third)], removals: [second.id])
+
+        let reopened = try SuggestionAnalysisStore(url: databaseURL, legacyURL: legacyURL).loadMigratingLegacy()
+        #expect(reopened.count == 2)
+        #expect(reopened[first.id]?.resourceDigest == "checked")
+        #expect(reopened[second.id] == nil)
+        #expect(reopened[third.id]?.matches(third) == true)
+    }
+
     @Test("仅有本地缩略图时仍可用于建议分析")
     @MainActor
     func localThumbnailSurvivesMissingCloudOriginal() async {
@@ -316,6 +370,8 @@ struct SuggestionsRefinementTests {
         #expect(SuggestionScanPace.analysisLimit(isCharging: false) == 48)
         #expect(SuggestionScanPace.resourceLimit(isCharging: false) == 4)
         #expect(SuggestionScanPace.itemDelay(isCharging: false) == .milliseconds(300))
+        #expect(SuggestionScanPace.foregroundItemDelay(isCharging: true) == .milliseconds(120))
+        #expect(SuggestionScanPace.foregroundItemDelay(isCharging: false) == .milliseconds(300))
     }
 
     @Test("已有相簿待办的截图不会再次进入建议队列")

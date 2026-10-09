@@ -26,12 +26,16 @@ final class PhotoSuggestionService {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let analyzer = PhotoSuggestionAnalyzer()
+    @ObservationIgnored private let interactionGate = SuggestionInteractionGate()
     @ObservationIgnored private let snapshotWriter: SuggestionGroupSnapshotWriter
     @ObservationIgnored private var snapshotRevision = 0
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var priorityAttemptedGroupIDs = Set<String>()
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var libraryRevision: Int?
+    @ObservationIgnored private var currentGroupCacheLibrary: ObjectIdentifier?
+    @ObservationIgnored private var currentGroupCacheRevision: Int?
+    @ObservationIgnored private var currentGroupCache: [String: Bool] = [:]
     /// Album choices are local protection tasks. Keep them out of generated
     /// cleanup suggestions even though the Photos asset itself is still
     /// accessible and has no ReviewStore decision yet.
@@ -122,6 +126,14 @@ final class PhotoSuggestionService {
     }
 
     func isCurrent(_ group: CleanupSuggestion, library: PhotoLibraryService) -> Bool {
+        let libraryID = ObjectIdentifier(library)
+        let assetRevision = library.assetRevision
+        if currentGroupCacheLibrary != libraryID || currentGroupCacheRevision != assetRevision {
+            currentGroupCacheLibrary = libraryID
+            currentGroupCacheRevision = assetRevision
+            currentGroupCache.removeAll(keepingCapacity: true)
+        }
+        if let cached = currentGroupCache[group.id] { return cached }
         let assets = group.assetIDs.compactMap { id -> SuggestionAsset? in
             guard let asset = library.asset(with: id) else { return nil }
             return SuggestionAsset(id: id, modifiedAt: asset.modificationDate, createdAt: asset.creationDate,
@@ -130,7 +142,10 @@ final class PhotoSuggestionService {
                                    isLivePhoto: asset.mediaSubtypes.contains(.photoLive), burstID: asset.burstIdentifier,
                                    isProtected: false, isEligible: true)
         }
-        return assets.count == group.assetIDs.count && CleanupSuggestion.signature(kind: group.kind, assets: assets) == group.id
+        let current = assets.count == group.assetIDs.count &&
+            CleanupSuggestion.signature(kind: group.kind, assets: assets) == group.id
+        currentGroupCache[group.id] = current
+        return current
     }
 
     func startIfNeeded(library: PhotoLibraryService, reviews: ReviewStore) {
@@ -148,6 +163,16 @@ final class PhotoSuggestionService {
             return
         }
         start(library: library, reviews: reviews)
+    }
+
+    /// Give navigation and review-card handoffs priority over optional image
+    /// analysis. The in-flight Vision request finishes, then the scan waits
+    /// briefly before requesting another image.
+    func deferAnalysisForInteraction() {
+        let gate = interactionGate
+        Task(priority: .userInitiated) {
+            await gate.deferWork(for: .milliseconds(900))
+        }
     }
 
     /// Score the group the user opened before the rest of the library. A full
@@ -197,31 +222,44 @@ final class PhotoSuggestionService {
                                                          thermalState: ProcessInfo.processInfo.thermalState,
                                                          background: background, isCharging: isCharging)
         guard !isEnergyPaused else { scheduleBackgroundCheck(); return }
-        let descriptors = library.assets.filter { $0.mediaType == .image }.map { asset in
-            let decision = reviews.decision(for: asset.localIdentifier)
-            let protected = asset.isFavorite || reviews.isPendingFavorite(asset.localIdentifier) || decision == .keep ||
-                albumAssignments?.assignment(for: asset.localIdentifier) != nil
-            return SuggestionAsset(
-                id: asset.localIdentifier, modifiedAt: asset.modificationDate, createdAt: asset.creationDate,
-                width: asset.pixelWidth, height: asset.pixelHeight,
-                isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
-                isLivePhoto: asset.mediaSubtypes.contains(.photoLive), burstID: asset.burstIdentifier,
-                isProtected: protected, isEligible: decision == nil && !protected
-            )
-        }.filter { $0.isEligible || $0.isProtected }
         libraryRevision = library.suggestionRevision
         let currentGeneration = UUID()
         generation = currentGeneration
         isScanning = true
         errorMessage = nil
-        totalCount = descriptors.count
-        checkedCount = min(checkedCount, totalCount)
-        saveGroupSnapshot()
         let charging = isCharging
         scanTask = Task(priority: background ? .background : .utility) { [weak self, analyzer] in
-            let receiver = self
-            await analyzer.scan(descriptors, background: background, isCharging: charging) { update in
-                await receiver?.receive(update, generation: currentGeneration)
+            guard let self else { return }
+            if !background { await interactionGate.waitIfNeeded() }
+            guard !Task.isCancelled, generation == currentGeneration else { return }
+            var descriptors: [SuggestionAsset] = []
+            descriptors.reserveCapacity(library.assets.count)
+            // Reading thousands of PHAsset properties in one main-actor pass
+            // can freeze the first frame after returning to the app.
+            for (index, asset) in library.assets.enumerated() {
+                guard !Task.isCancelled, generation == currentGeneration else { return }
+                if asset.mediaType == .image {
+                    let decision = reviews.decision(for: asset.localIdentifier)
+                    let protected = asset.isFavorite || reviews.isPendingFavorite(asset.localIdentifier) || decision == .keep ||
+                        albumAssignments?.assignment(for: asset.localIdentifier) != nil
+                    let descriptor = SuggestionAsset(
+                        id: asset.localIdentifier, modifiedAt: asset.modificationDate, createdAt: asset.creationDate,
+                        width: asset.pixelWidth, height: asset.pixelHeight,
+                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
+                        isLivePhoto: asset.mediaSubtypes.contains(.photoLive), burstID: asset.burstIdentifier,
+                        isProtected: protected, isEligible: decision == nil && !protected
+                    )
+                    if descriptor.isEligible || descriptor.isProtected { descriptors.append(descriptor) }
+                }
+                if index.isMultiple(of: 32) { await Task.yield() }
+            }
+            guard !Task.isCancelled, generation == currentGeneration else { return }
+            totalCount = descriptors.count
+            checkedCount = min(checkedCount, totalCount)
+            saveGroupSnapshot()
+            await analyzer.scan(descriptors, background: background, isCharging: charging,
+                                interactionGate: interactionGate) { update in
+                await self.receive(update, generation: currentGeneration)
             }
         }
     }
@@ -318,24 +356,31 @@ final class PhotoSuggestionService {
         guard self.generation == generation else { return }
         let oldGroups = groups
         let previousProgress = SuggestionScanProgress(checked: checkedCount, total: totalCount, unavailable: unavailableCount)
-        let previous = Dictionary(uniqueKeysWithValues: oldGroups.map { ($0.id, $0) })
-        let incomingGroups = update.groups.map { incoming in
-            guard let earlier = previous[incoming.id], earlier.aestheticEvaluationComplete,
-                  !incoming.aestheticEvaluationComplete else { return incoming }
-            // The full-library scan may still be working. Do not put the
-            // opened group back into its "comparing" state after an explicit
-            // foreground attempt has already completed.
-            var merged = incoming
-            merged.recommendedKeepID = earlier.recommendedKeepID
-            merged.recommendationBasis = earlier.recommendationBasis
-            merged.aestheticLead = earlier.aestheticLead
-            merged.aestheticScores = earlier.aestheticScores
-            merged.aestheticScores.merge(incoming.aestheticScores) { _, newer in newer }
-            merged.aestheticEvaluationComplete = true
-            return merged
+        var groupsChanged = false
+        // Numeric scan progress deliberately carries no new groups. Avoid
+        // rebuilding hundreds of group IDs on the main actor for that update.
+        if !update.groups.isEmpty || update.complete {
+            let previous = Dictionary(uniqueKeysWithValues: oldGroups.map { ($0.id, $0) })
+            let incomingGroups = update.groups.map { incoming in
+                guard let earlier = previous[incoming.id], earlier.aestheticEvaluationComplete,
+                      !incoming.aestheticEvaluationComplete else { return incoming }
+                // The full-library scan may still be working. Do not put the
+                // opened group back into its "comparing" state after an explicit
+                // foreground attempt has already completed.
+                var merged = incoming
+                merged.recommendedKeepID = earlier.recommendedKeepID
+                merged.recommendationBasis = earlier.recommendationBasis
+                merged.aestheticLead = earlier.aestheticLead
+                merged.aestheticScores = earlier.aestheticScores
+                merged.aestheticScores.merge(incoming.aestheticScores) { _, newer in newer }
+                merged.aestheticEvaluationComplete = true
+                return merged
+            }
+            let mergedGroups = SuggestionGroupProgress.merge(previous: oldGroups, incoming: incomingGroups,
+                                                             complete: update.complete)
+            groupsChanged = mergedGroups != oldGroups
+            if groupsChanged { groups = mergedGroups }
         }
-        groups = SuggestionGroupProgress.merge(previous: oldGroups, incoming: incomingGroups,
-                                               complete: update.complete)
         checkedCount = update.checked
         unavailableCount = update.unavailable
         isVerifyingCopies = update.verifying
@@ -349,7 +394,9 @@ final class PhotoSuggestionService {
             scanTask = nil
         }
         let currentProgress = SuggestionScanProgress(checked: checkedCount, total: totalCount, unavailable: unavailableCount)
-        if groups != oldGroups || currentProgress != previousProgress || update.complete || update.paused {
+        let previousSavedStep = (previousProgress.percentage(complete: false) ?? 0) / 5
+        let currentSavedStep = (currentProgress.percentage(complete: false) ?? 0) / 5
+        if groupsChanged || previousSavedStep != currentSavedStep || update.complete || update.paused {
             saveGroupSnapshot()
         }
     }
@@ -366,6 +413,25 @@ final class PhotoSuggestionService {
             let saved = await writer.save(snapshot, revision: revision)
             guard !saved else { return }
             self?.errorMessage = String(localized: "建议已生成，但未能保存到本机。下次打开时可能需要重新检查。")
+        }
+    }
+}
+
+actor SuggestionInteractionGate {
+    private let clock = ContinuousClock()
+    private var resumeAt: ContinuousClock.Instant?
+
+    func deferWork(for duration: Duration) {
+        let requestedResume = clock.now.advanced(by: duration)
+        if let resumeAt, resumeAt >= requestedResume { return }
+        resumeAt = requestedResume
+    }
+
+    func waitIfNeeded() async {
+        while !Task.isCancelled, let resumeAt {
+            let remaining = clock.now.duration(to: resumeAt)
+            guard remaining > .zero else { return }
+            try? await Task.sleep(for: remaining)
         }
     }
 }
@@ -481,17 +547,27 @@ private struct SuggestionScanUpdate: Sendable {
 /// value snapshots cross into the UI; no image analysis runs on the main actor.
 private actor PhotoSuggestionAnalyzer {
     private var analyses: [String: SuggestionAnalysis] = [:]
+    private var groupingRevision = 0
+    private var cachedGroupingRevision: Int?
+    private var cachedGroups: [CleanupSuggestion]?
+    private var dirtyAnalysisIDs = Set<String>()
+    private var removedAnalysisIDs = Set<String>()
+    private var analysisStore: SuggestionAnalysisStore?
     /// A resource request can fail because an iCloud-only original is not
     /// available locally. Keep that result separately from the analysis model
     /// so it survives a background run without making the asset look like a
     /// duplicate or an unavailable preview.
     private var resourceVerificationFailures: [String: Date] = [:]
+    private var resourceFailuresDirty = false
     private var loaded = false
     private var cacheError: String?
     private var lastCacheSave = Date.distantPast
-    private let cacheURL: URL = URL.applicationSupportDirectory
+    private let legacyCacheURL: URL = URL.applicationSupportDirectory
         .appending(path: "PhotoSuggestions", directoryHint: .isDirectory)
         .appending(path: "analysis-v1.json")
+    private let storeURL: URL = URL.applicationSupportDirectory
+        .appending(path: "PhotoSuggestions", directoryHint: .isDirectory)
+        .appending(path: "analysis-v2.sqlite")
     private let resourceFailureURL: URL = URL.applicationSupportDirectory
         .appending(path: "PhotoSuggestions", directoryHint: .isDirectory)
         .appending(path: "resource-failures-v1.json")
@@ -524,6 +600,8 @@ private actor PhotoSuggestionAnalyzer {
             // asset eligible for the normal high-quality pass later.
             latest.aestheticChecked = score != nil
             analyses[asset.id] = latest
+            groupingRevision &+= 1
+            dirtyAnalysisIDs.insert(asset.id)
         }
         let result = Dictionary(uniqueKeysWithValues: members.compactMap { member in
             analyses[member.id].map { (member.id, $0) }
@@ -535,9 +613,11 @@ private actor PhotoSuggestionAnalyzer {
     }
 
     func scan(_ assets: [SuggestionAsset], background: Bool, isCharging: Bool,
+              interactionGate: SuggestionInteractionGate,
               progress: @Sendable (SuggestionScanUpdate) async -> Void) async {
         loadCache()
         let current = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+        let previousIDs = Set(analyses.keys)
         analyses = analyses.filter { id, analysis in
             guard let asset = current[id], analysis.matches(asset) else { return false }
             if let unavailableAt = analysis.previewUnavailableAt {
@@ -547,26 +627,42 @@ private actor PhotoSuggestionAnalyzer {
             // them again. The loop below revisits stale versions first.
             return !asset.isScreenshot || (analysis.eventDates != nil && analysis.screenshotContentChecked == true)
         }
+        // A new library snapshot may change eligibility even when no cached
+        // analysis changed. Rebuild groups once for this scan, then reuse the
+        // result until an actual analysis changes it.
+        groupingRevision &+= 1
+        cachedGroups = nil
+        let removed = previousIDs.subtracting(analyses.keys)
+        removedAnalysisIDs.formUnion(removed)
+        dirtyAnalysisIDs.subtract(removed)
         // A changed asset with the same local identifier must get a fresh
         // resource attempt. Drop failure timestamps that no longer belong to
         // a retained analysis or to the current library snapshot.
+        let previousFailures = resourceVerificationFailures
         resourceVerificationFailures = resourceVerificationFailures.filter { id, _ in
             guard let asset = current[id], let analysis = analyses[id] else { return false }
             return analysis.matches(asset)
         }
+        if previousFailures != resourceVerificationFailures { resourceFailuresDirty = true }
         let ordered = SuggestionScanOrder.ordered(assets)
         let resumed = SuggestionScanProgress.fromCache(assets: ordered, analyses: analyses)
         var checked = resumed.checked
         var unavailable = resumed.unavailable
         var analysisFailures = 0
         var newAnalyses = 0
+        let clock = ContinuousClock()
         let lightweightProgressStride = max(4, assets.count / 100)
+        if !background { await interactionGate.waitIfNeeded() }
+        guard !Task.isCancelled else { return }
         await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable))
+        var lastGroupRefresh = clock.now
         for asset in ordered {
             guard !Task.isCancelled else { saveCache(force: true); return }
             if analyses[asset.id] == nil ||
                (asset.isScreenshot && analyses[asset.id]?.previewUnavailableAt == nil &&
                 analyses[asset.id]?.hasCurrentScreenshotClassification == false) {
+                if !background { await interactionGate.waitIfNeeded() }
+                guard !Task.isCancelled else { saveCache(force: true); return }
                 let energyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                                     thermalState: ProcessInfo.processInfo.thermalState,
                                                                     background: background, isCharging: isCharging)
@@ -585,16 +681,33 @@ private actor PhotoSuggestionAnalyzer {
                     analyses[asset.id] = SuggestionAnalysis(asset: asset, differenceHash: 0, featurePrint: Data(),
                                                            hasPastEvent: false, previewUnavailableAt: .now)
                 }
+                if analyses[asset.id] != nil {
+                    groupingRevision &+= 1
+                    dirtyAnalysisIDs.insert(asset.id)
+                    removedAnalysisIDs.remove(asset.id)
+                } else {
+                    dirtyAnalysisIDs.remove(asset.id)
+                    removedAnalysisIDs.insert(asset.id)
+                }
                 newAnalyses += 1
                 if background && !isCharging {
                     try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
+                } else if !background {
+                    try? await Task.sleep(for: SuggestionScanPace.foregroundItemDelay(isCharging: isCharging))
                 }
                 checked += 1
-                let refreshGroups = checked % 48 == 0 ||
-                    (asset.isScreenshot && (checked % 8 == 0 || analyses[asset.id]?.temporaryScreenshotKind != nil))
+                // A full-library regroup is much more expensive than one
+                // image analysis. Batch discoveries so progress stays visible
+                // without repeatedly spending seconds on the same photos.
+                let newScreenshotSuggestion = asset.isScreenshot &&
+                    analyses[asset.id]?.temporaryScreenshotKind != nil
+                let refreshGroups = (newAnalyses.isMultiple(of: 192) || newScreenshotSuggestion) &&
+                    clock.now - lastGroupRefresh >= .seconds(15)
                 if refreshGroups {
+                    if !background { await interactionGate.waitIfNeeded() }
                     saveCache()
                     await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable))
+                    lastGroupRefresh = clock.now
                 } else if newAnalyses % lightweightProgressStride == 0 {
                     saveCache()
                     // Keep existing groups visible; this update only advances
@@ -607,9 +720,12 @@ private actor PhotoSuggestionAnalyzer {
         // Score only photos that actually entered a comparison group. Existing
         // feature-print caches remain usable while scores are filled in, so
         // an upgrade never empties Suggestions just to migrate the cache.
+        if !background { await interactionGate.waitIfNeeded() }
         let comparisonIDs = Set(groups(for: assets).filter { $0.kind == .similar }.flatMap(\.assetIDs))
         var newScores = 0
         for asset in ordered where comparisonIDs.contains(asset.id) && analyses[asset.id]?.aestheticChecked != true {
+            guard !Task.isCancelled else { saveCache(force: true); return }
+            if !background { await interactionGate.waitIfNeeded() }
             guard !Task.isCancelled else { saveCache(force: true); return }
             let energyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                                 thermalState: ProcessInfo.processInfo.thermalState,
@@ -625,11 +741,15 @@ private actor PhotoSuggestionAnalyzer {
                 analyses[asset.id]?.aestheticScore = autoreleasepool { aestheticScore(for: image) }
             }
             analyses[asset.id]?.aestheticChecked = true
+            groupingRevision &+= 1
+            dirtyAnalysisIDs.insert(asset.id)
             newScores += 1
             if background && !isCharging {
                 try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
+            } else if !background {
+                try? await Task.sleep(for: SuggestionScanPace.foregroundItemDelay(isCharging: isCharging))
             }
-            if newScores % 4 == 0 {
+            if newScores % 24 == 0 {
                 saveCache()
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable))
             }
@@ -641,6 +761,7 @@ private actor PhotoSuggestionAnalyzer {
         guard !Task.isCancelled else { saveCache(force: true); return }
         // Stream original resources only for visually nominated still copies.
         // Live Photos remain visual suggestions because their movie matters.
+        if !background { await interactionGate.waitIfNeeded() }
         let probable = groups(for: assets).filter { $0.reason == .possibleVersions }
         let nominated = Set(probable.flatMap(\.assetIDs))
         await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable, verifying: !nominated.isEmpty))
@@ -653,6 +774,8 @@ private actor PhotoSuggestionAnalyzer {
             background: background
         )
         for asset in resourceCandidates {
+            guard !Task.isCancelled else { saveCache(force: true); return }
+            if !background { await interactionGate.waitIfNeeded() }
             guard !Task.isCancelled else { saveCache(force: true); return }
             let energyPaused = SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                                 thermalState: ProcessInfo.processInfo.thermalState,
@@ -669,18 +792,25 @@ private actor PhotoSuggestionAnalyzer {
                 analyses[asset.id]?.resourceDigest = fingerprint.digest
                 analyses[asset.id]?.resourceBytes = fingerprint.bytes
                 analyses[asset.id]?.checkedResources = true
-                resourceVerificationFailures.removeValue(forKey: asset.id)
+                groupingRevision &+= 1
+                dirtyAnalysisIDs.insert(asset.id)
+                if resourceVerificationFailures.removeValue(forKey: asset.id) != nil {
+                    resourceFailuresDirty = true
+                }
             } else {
                 // Count the failed attempt against this run's low-impact
                 // budget, but remember it so the next background run advances
                 // to later copies instead of retrying the same first eight.
                 resourceVerificationFailures[asset.id] = .now
+                resourceFailuresDirty = true
             }
             verified += 1
             if background && !isCharging {
                 try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
+            } else if !background {
+                try? await Task.sleep(for: SuggestionScanPace.foregroundItemDelay(isCharging: isCharging))
             }
-            if verified % 8 == 0 {
+            if verified % 24 == 0 {
                 saveCache()
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable, verifying: true))
             }
@@ -693,9 +823,10 @@ private actor PhotoSuggestionAnalyzer {
     }
 
     private func groups(for assets: [SuggestionAsset]) -> [CleanupSuggestion] {
+        if cachedGroupingRevision == groupingRevision, let cachedGroups { return cachedGroups }
         var prints: [String: VNFeaturePrintObservation] = [:]
         var distances: [String: Float] = [:]
-        return SuggestionGrouping.build(assets: assets, analyses: analyses) { left, right in
+        let rebuilt = SuggestionGrouping.build(assets: assets, analyses: analyses) { left, right in
             let key = [left, right].sorted().joined(separator: "\n")
             if let distance = distances[key] { return distance }
             for id in [left, right] where prints[id] == nil {
@@ -708,6 +839,9 @@ private actor PhotoSuggestionAnalyzer {
             distances[key] = distance
             return distance
         }
+        cachedGroups = rebuilt
+        cachedGroupingRevision = groupingRevision
+        return rebuilt
     }
 
     private func analyze(_ image: UIImage, asset: SuggestionAsset) -> SuggestionAnalysis? {
@@ -873,8 +1007,15 @@ private actor PhotoSuggestionAnalyzer {
     private func loadCache() {
         guard !loaded else { return }
         loaded = true
-        if let data = try? Data(contentsOf: cacheURL) {
-            if let cached = SuggestionAnalysisCache.decode(data) {
+        do {
+            let store = try SuggestionAnalysisStore(url: storeURL, legacyURL: legacyCacheURL)
+            analyses = try store.loadMigratingLegacy()
+            analysisStore = store
+        } catch {
+            // Keep an old cache usable if migration runs out of space. Do not
+            // discard its analyses or ask Vision to recheck the whole library.
+            if let data = try? Data(contentsOf: legacyCacheURL),
+               let cached = SuggestionAnalysisCache.decode(data) {
                 analyses = cached
             } else {
                 cacheError = String(localized: "旧的建议分析缓存无法读取，正在重新检查照片。")
@@ -888,10 +1029,24 @@ private actor PhotoSuggestionAnalyzer {
 
     private func saveCache(force: Bool = false) {
         guard force || Date.now.timeIntervalSince(lastCacheSave) > 30 else { return }
+        guard !dirtyAnalysisIDs.isEmpty || !removedAnalysisIDs.isEmpty || resourceFailuresDirty else { return }
         do {
-            try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try JSONEncoder().encode(analyses).write(to: cacheURL, options: .atomic)
-            try JSONEncoder().encode(resourceVerificationFailures).write(to: resourceFailureURL, options: .atomic)
+            if let analysisStore {
+                let changed = Dictionary(uniqueKeysWithValues: dirtyAnalysisIDs.compactMap { id in
+                    analyses[id].map { (id, $0) }
+                })
+                try analysisStore.apply(upserts: changed, removals: removedAnalysisIDs)
+            } else {
+                // Only an unavailable SQLite store uses the old snapshot path.
+                try FileManager.default.createDirectory(at: legacyCacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try JSONEncoder().encode(analyses).write(to: legacyCacheURL, options: .atomic)
+            }
+            dirtyAnalysisIDs.removeAll()
+            removedAnalysisIDs.removeAll()
+            if resourceFailuresDirty {
+                try JSONEncoder().encode(resourceVerificationFailures).write(to: resourceFailureURL, options: .atomic)
+                resourceFailuresDirty = false
+            }
             cacheError = nil
             lastCacheSave = .now
         } catch {

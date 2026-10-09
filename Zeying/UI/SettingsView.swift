@@ -6,7 +6,6 @@ struct SettingsView: View {
     let library: PhotoLibraryService
 
     @Environment(AppSettings.self) private var settings
-    @Environment(\.scenePhase) private var scenePhase
     @State private var showingGuide = false
 
     var body: some View {
@@ -82,10 +81,6 @@ struct SettingsView: View {
             .background(Color.clear)
         }
         .toolbar(.hidden, for: .navigationBar)
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            Task { await library.refresh() }
-        }
         .fullScreenCover(isPresented: $showingGuide) {
             FirstUseGuideView { showingGuide = false }
         }

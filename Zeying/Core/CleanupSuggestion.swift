@@ -396,4 +396,7 @@ enum SuggestionScanPace {
     static func itemDelay(isCharging: Bool) -> Duration {
         isCharging ? .zero : .milliseconds(300)
     }
+    static func foregroundItemDelay(isCharging: Bool) -> Duration {
+        isCharging ? .milliseconds(120) : .milliseconds(300)
+    }
 }

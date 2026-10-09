@@ -8,6 +8,7 @@ import Observation
 @Observable
 final class AssetSizeService {
     @ObservationIgnored private var cachedSizes: [String: CachedSize] = [:]
+    @ObservationIgnored private var pendingLocalSizes: [String: LocalSizeRequest] = [:]
 
     init() {}
 
@@ -29,11 +30,38 @@ final class AssetSizeService {
     func automaticLocalSize(for asset: PHAsset) async -> Int64? {
         if let size = knownSize(for: asset) { return size }
         guard !Task.isCancelled else { return nil }
-        return await measuredSize(
-            for: asset,
-            allowNetwork: false,
-            streamWhenMetadataIsUnknown: asset.mediaType == .image
+        let identifier = asset.localIdentifier
+        let request = localSizeRequest(for: asset)
+        let size = await request.task.value
+        if pendingLocalSizes[identifier]?.token == request.token {
+            pendingLocalSizes.removeValue(forKey: identifier)
+        }
+        guard !Task.isCancelled, let size else { return nil }
+        cachedSizes[identifier] = CachedSize(modificationDate: asset.modificationDate, bytes: size)
+        return size
+    }
+
+    private func localSizeRequest(for asset: PHAsset) -> LocalSizeRequest {
+        let identifier = asset.localIdentifier
+        let modifiedAt = asset.modificationDate
+        let isImage = asset.mediaType == .image
+        if let pending = pendingLocalSizes[identifier], pending.modificationDate == modifiedAt {
+            return pending
+        }
+        pendingLocalSizes[identifier]?.task.cancel()
+        let request = LocalSizeRequest(
+            modificationDate: modifiedAt,
+            token: UUID(),
+            task: Task.detached(priority: .background) {
+                await AssetSizeLookup.measure(
+                    identifier: identifier,
+                    allowNetwork: false,
+                    streamWhenMetadataIsUnknown: isImage
+                )
+            }
         )
+        pendingLocalSizes[identifier] = request
+        return request
     }
 
     /// Streams every resource for an asset and returns the sum of the bytes.
@@ -75,6 +103,12 @@ final class AssetSizeService {
     private struct CachedSize {
         let modificationDate: Date?
         let bytes: Int64
+    }
+
+    private struct LocalSizeRequest {
+        let modificationDate: Date?
+        let token: UUID
+        let task: Task<Int64?, Never>
     }
 }
 

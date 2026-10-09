@@ -4,6 +4,23 @@ import Testing
 
 @MainActor
 struct ReviewResumeStoreTests {
+    @Test("随机会切换当前照片，切回顺序不丢失剩余照片")
+    func shuffleAndRestoreCurrentPhoto() {
+        let original = ["reviewed", "a", "b", "c", "d"]
+        for _ in 0..<20 {
+            let shuffled = ReviewQueueOrdering.shuffled(Array(original.dropFirst()))
+            #expect(shuffled.first != "a")
+            #expect(Set(shuffled) == Set(original.dropFirst()))
+            let restored = ReviewQueueOrdering.restored(shuffled, originalOrder: original)
+            #expect(restored == Array(original.dropFirst()))
+        }
+    }
+
+    @Test("恢复顺序会保留原快照之后新增的照片")
+    func restoreKeepsNewerItems() {
+        #expect(ReviewQueueOrdering.restored(["new", "b", "a"], originalOrder: ["a", "b"]) == ["a", "b", "new"])
+    }
+
     @Test("上次处理的月份会在重新打开后恢复")
     func lastMonthPersists() throws {
         let suiteName = "ZeyingTests.ReviewResume.\(UUID().uuidString)"

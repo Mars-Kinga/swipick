@@ -95,7 +95,9 @@ struct AssetImageView: View {
             }
             let localImage: UIImage?
             if usesReviewCache {
-                localImage = await library.prepareReviewPreview(for: asset)
+                // The quick poster was already requested above. A second
+                // high-quality still request can hold up video playback.
+                localImage = asset.mediaType == .video ? image : await library.prepareReviewPreview(for: asset)
             } else {
                 localImage = await library.requestImage(
                     for: asset,
@@ -220,6 +222,7 @@ struct AssetPreviewView: View {
     var initialPreview: UIImage?
     var requiresFullQuality = false
     var autoplayVideo = false
+    var isActive = true
     var cornerRadius: CGFloat = 28
     var isLivePhotoPressed = false
 
@@ -352,9 +355,12 @@ struct AssetPreviewView: View {
             videoPlaybackTask?.cancel()
             videoPlaybackTask = nil
             videoPlaybackState = .idle
-            if asset.mediaType == .video, autoplayVideo {
+            if asset.mediaType == .video, autoplayVideo, isActive {
                 startVideoPlayback(allowNetwork: false)
             }
+        }
+        .onChange(of: isActive) { _, active in
+            if !active, asset.mediaType == .video { cancelVideoPlayback() }
         }
         .onChange(of: isLivePhotoPressed) { _, isPressed in
             if isPressed {
@@ -435,11 +441,15 @@ struct AssetPreviewView: View {
                     .tint(.white)
                 Text(String(localized: "正在加载视频…"))
                     .font(.caption.weight(.medium))
+                Text(String(localized: "无需等待加载，可直接保留或稍后处理"))
+                    .font(.caption2)
+                    .multilineTextAlignment(.center)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .foregroundStyle(.white)
             .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .allowsHitTesting(false)
         case .failed:
             VStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle")
@@ -475,6 +485,7 @@ struct AssetPreviewView: View {
 
     private func startVideoPlayback(allowNetwork: Bool) {
         guard asset.mediaType == .video,
+              isActive,
               player == nil,
               videoPlaybackTask == nil else { return }
 
@@ -509,6 +520,16 @@ struct AssetPreviewView: View {
                 previewPlayer.play()
             }
         }
+    }
+
+    private func cancelVideoPlayback() {
+        activePlayerIdentifier = nil
+        videoPlaybackTask?.cancel()
+        videoPlaybackTask = nil
+        player?.pause()
+        player = nil
+        PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
+        videoPlaybackState = .manual
     }
 
     private func loadLivePhotoIfNeeded() {
@@ -680,6 +701,8 @@ struct AssetSizeCapsule: View {
     let asset: PHAsset
     let sizes: AssetSizeService
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     @State private var showingSizeExplanation = false
     @State private var size: Int64?
     @State private var isFetching = false
@@ -687,8 +710,19 @@ struct AssetSizeCapsule: View {
     @State private var activeAssetIdentifier: String?
     @State private var explicitSizeTask: Task<Void, Never>?
 
+    private var displayedSize: Int64? {
+        activeAssetIdentifier == asset.localIdentifier ? (size ?? sizes.knownSize(for: asset)) : sizes.knownSize(for: asset)
+    }
+
+    private var displayedIsFetching: Bool {
+        activeAssetIdentifier == asset.localIdentifier && isFetching
+    }
+
     private var sizeText: String {
-        guard let size else { return didAttempt ? String(localized: "无法获取") : String(localized: "待获取") }
+        guard let size = displayedSize else {
+            return activeAssetIdentifier == asset.localIdentifier && didAttempt
+                ? String(localized: "无法获取") : String(localized: "待获取")
+        }
         return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 
@@ -696,14 +730,14 @@ struct AssetSizeCapsule: View {
         Button {
             showingSizeExplanation = true
         } label: {
-            Text(isFetching ? String(localized: "读取中") : sizeText)
+            Text(displayedSize == nil ? "—" : sizeText)
                 .font(.caption.weight(.medium).monospacedDigit())
-                .frame(minWidth: 54, minHeight: 44)
-                .padding(.horizontal, 10)
+                .lineLimit(1)
+                .frame(width: dynamicTypeSize.isAccessibilitySize ? 112 : 92, height: 44)
         }
         .buttonStyle(.plain)
-        .disabled(isFetching || size != nil)
-        .accessibilityLabel(size == nil ? String(localized: "获取照片文件大小") : String(localized: "照片文件大小 \(sizeText)"))
+        .disabled(displayedIsFetching || displayedSize != nil)
+        .accessibilityLabel(displayedSize == nil ? String(localized: "获取照片文件大小") : String(localized: "照片文件大小 \(sizeText)"))
         .zeyingGlass(in: Capsule())
         .foregroundStyle(.secondary)
         .confirmationDialog(String(localized: "文件大小"), isPresented: $showingSizeExplanation, titleVisibility: .visible) {

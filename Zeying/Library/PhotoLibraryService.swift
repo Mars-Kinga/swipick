@@ -43,7 +43,11 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private let photoLibrary = PHPhotoLibrary.shared()
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var refreshGeneration = 0
+    @ObservationIgnored private var albumRefreshGeneration = 0
+    @ObservationIgnored private var assetFetchResult: PHFetchResult<PHAsset>?
     @ObservationIgnored private var suggestionAssetFingerprint: Int?
+    @ObservationIgnored private var previewAssetFingerprint: Int?
+    @ObservationIgnored private var assetSnapshotFingerprint: Int?
     @ObservationIgnored private var assetsByIdentifier: [String: PHAsset] = [:]
     @ObservationIgnored private let quickPreviewCache = NSCache<NSString, UIImage>()
     @ObservationIgnored private let reviewPreviewCache = NSCache<NSString, UIImage>()
@@ -54,11 +58,13 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var unavailableLocalReviewIDs: Set<String> = []
     @ObservationIgnored private var networkPreviewTasks: [String: Task<UIImage?, Never>] = [:]
     @ObservationIgnored private var networkPreviewTokens: [String: UUID] = [:]
+    @ObservationIgnored private var localVideoItemTasks: [String: Task<AVPlayerItem?, Never>] = [:]
 
     private(set) var authorizationStatus: PHAuthorizationStatus
     private(set) var assets: [PHAsset] = []
     private(set) var albums: [LibraryAlbum] = []
     private(set) var revision = 0
+    private(set) var assetRevision = 0
     private(set) var suggestionRevision = 0
     private(set) var isLoading = false
     private(set) var hasLoaded = false
@@ -113,6 +119,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     private func startRefresh() -> Task<Void, Never> {
         refreshTask?.cancel()
         refreshGeneration &+= 1
+        albumRefreshGeneration &+= 1
         let generation = refreshGeneration
         isLoading = true
         let task = Task { @MainActor [weak self] in
@@ -134,7 +141,10 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         }
         guard !Task.isCancelled else { return }
 
-        let refreshedAssets = await fetchAllAssets()
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        let fetchedResult = PHAsset.fetchAssets(with: options)
+        let refreshedAssets = await fetchAllAssets(from: fetchedResult)
         guard !Task.isCancelled, generation == refreshGeneration else { return }
 
         let refreshedAlbums = await fetchAlbums(authorizedAssets: refreshedAssets)
@@ -145,32 +155,59 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             clearSnapshot()
             return
         }
-        // An external edit can keep the same local identifier while changing
-        // its pixels. Never show an older cached card after a library refresh.
-        stopReviewPrefetching()
-        quickPreviewCache.removeAllObjects()
-        reviewPreviewCache.removeAllObjects()
-        unavailableLocalReviewIDs.removeAll()
-        assets = refreshedAssets
-        assetsByIdentifier = Dictionary(
-            uniqueKeysWithValues: refreshedAssets.map { ($0.localIdentifier, $0) }
-        )
-        // PhotoKit also reports album-only changes. Rebuilding albums must
-        // refresh the UI, but it must not restart a long image analysis.
-        var fingerprint = Hasher()
-        for asset in refreshedAssets where asset.mediaType == .image {
-            fingerprint.combine(asset.localIdentifier)
-            fingerprint.combine(asset.creationDate)
-            fingerprint.combine(asset.modificationDate)
-            fingerprint.combine(asset.pixelWidth)
-            fingerprint.combine(asset.pixelHeight)
-            fingerprint.combine(asset.mediaSubtypes.rawValue)
-            fingerprint.combine(asset.isFavorite)
-            fingerprint.combine(asset.burstIdentifier)
+        assetFetchResult = fetchedResult
+        // Album membership changes do not change image pixels. Keep the
+        // review cache and its in-flight requests when PhotoKit reports one.
+        var previewFingerprint = Hasher()
+        var snapshotFingerprint = Hasher()
+        var suggestionFingerprint = Hasher()
+        for asset in refreshedAssets {
+            previewFingerprint.combine(asset.localIdentifier)
+            previewFingerprint.combine(asset.mediaType.rawValue)
+            previewFingerprint.combine(asset.modificationDate)
+            previewFingerprint.combine(asset.pixelWidth)
+            previewFingerprint.combine(asset.pixelHeight)
+            previewFingerprint.combine(asset.mediaSubtypes.rawValue)
+            snapshotFingerprint.combine(asset.localIdentifier)
+            snapshotFingerprint.combine(asset.mediaType.rawValue)
+            snapshotFingerprint.combine(asset.creationDate)
+            snapshotFingerprint.combine(asset.modificationDate)
+            snapshotFingerprint.combine(asset.pixelWidth)
+            snapshotFingerprint.combine(asset.pixelHeight)
+            snapshotFingerprint.combine(asset.mediaSubtypes.rawValue)
+            snapshotFingerprint.combine(asset.isFavorite)
+            snapshotFingerprint.combine(asset.burstIdentifier)
+            if asset.mediaType == .image {
+                suggestionFingerprint.combine(asset.localIdentifier)
+                suggestionFingerprint.combine(asset.creationDate)
+                suggestionFingerprint.combine(asset.modificationDate)
+                suggestionFingerprint.combine(asset.pixelWidth)
+                suggestionFingerprint.combine(asset.pixelHeight)
+                suggestionFingerprint.combine(asset.mediaSubtypes.rawValue)
+                suggestionFingerprint.combine(asset.isFavorite)
+                suggestionFingerprint.combine(asset.burstIdentifier)
+            }
         }
-        let newFingerprint = fingerprint.finalize()
-        if suggestionAssetFingerprint != newFingerprint {
-            suggestionAssetFingerprint = newFingerprint
+        let newPreviewFingerprint = previewFingerprint.finalize()
+        if previewAssetFingerprint != newPreviewFingerprint {
+            previewAssetFingerprint = newPreviewFingerprint
+            stopReviewPrefetching()
+            quickPreviewCache.removeAllObjects()
+            reviewPreviewCache.removeAllObjects()
+            unavailableLocalReviewIDs.removeAll()
+        }
+        let newSnapshotFingerprint = snapshotFingerprint.finalize()
+        if assetSnapshotFingerprint != newSnapshotFingerprint {
+            assetSnapshotFingerprint = newSnapshotFingerprint
+            assetRevision &+= 1
+            assets = refreshedAssets
+            assetsByIdentifier = Dictionary(
+                uniqueKeysWithValues: refreshedAssets.map { ($0.localIdentifier, $0) }
+            )
+        }
+        let newSuggestionFingerprint = suggestionFingerprint.finalize()
+        if suggestionAssetFingerprint != newSuggestionFingerprint {
+            suggestionAssetFingerprint = newSuggestionFingerprint
             suggestionRevision &+= 1
         }
         albums = refreshedAlbums
@@ -343,15 +380,29 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         reviewPreviewCache.setObject(image, forKey: asset.localIdentifier as NSString, cost: cost)
     }
 
-    /// Prepare eight following cards at review quality from local pixels only.
+    /// Keep the nearest cards ready without flooding PhotoKit with concurrent
+    /// full-resolution requests. A quick rendition prevents an empty handoff
+    /// if the review-quality request has not completed yet.
     /// Cloud-only originals are not downloaded ahead of the user's decision.
     func prefetchReviewPreviews(_ upcoming: [PHAsset], keeping currentIdentifier: String) {
-        let candidates = Array(upcoming.prefix(8))
-        let needed = Set([currentIdentifier] + candidates.map(\.localIdentifier))
-        for identifier in reviewPreviewTasks.keys.filter({ !needed.contains($0) }) {
+        let candidates = Array(upcoming.prefix(5))
+        let nextVideo = candidates.prefix(2).first { $0.mediaType == .video }
+        let neededReview = Set([currentIdentifier] + candidates.prefix(2).map(\.localIdentifier))
+        let neededQuick = Set([currentIdentifier] + candidates.map(\.localIdentifier))
+        let neededVideo = Set([currentIdentifier] + [nextVideo?.localIdentifier].compactMap { $0 })
+        for identifier in reviewPreviewTasks.keys.filter({ !neededReview.contains($0) }) {
             reviewPreviewTasks[identifier]?.cancel()
             reviewPreviewTasks.removeValue(forKey: identifier)
             reviewPreviewTokens.removeValue(forKey: identifier)
+        }
+        for identifier in quickPreviewTasks.keys.filter({ !neededQuick.contains($0) }) {
+            quickPreviewTasks[identifier]?.cancel()
+            quickPreviewTasks.removeValue(forKey: identifier)
+            quickPreviewTokens.removeValue(forKey: identifier)
+        }
+        for identifier in localVideoItemTasks.keys.filter({ !neededVideo.contains($0) }) {
+            localVideoItemTasks[identifier]?.cancel()
+            localVideoItemTasks.removeValue(forKey: identifier)
         }
         // Prefetch owns no network work. Cancel any older opt-in network
         // tasks when the queue advances so an earlier screen cannot keep
@@ -362,15 +413,33 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             networkPreviewTokens.removeValue(forKey: identifier)
         }
 
-        for asset in candidates {
+        for asset in candidates.prefix(3)
+        where cachedQuickPreview(for: asset) == nil && cachedReviewPreview(for: asset) == nil {
+            _ = quickPreviewTask(for: asset)
+        }
+        // Decode only the two nearest full-size cards. Five simultaneous
+        // 1,500-pixel requests compete with the card being revealed and can
+        // cause a blank frame as well as unnecessary CPU and energy use.
+        for asset in candidates.prefix(2) where asset.mediaType != .video {
             if cachedReviewPreview(for: asset) == nil,
                !unavailableLocalReviewIDs.contains(asset.localIdentifier) {
                 _ = reviewPreviewTask(for: asset)
             }
         }
+        // One nearby local player item is enough to hide PhotoKit startup
+        // without downloading an iCloud video or retaining a video queue.
+        if let nextVideo, localVideoItemTasks[nextVideo.localIdentifier] == nil {
+            localVideoItemTasks[nextVideo.localIdentifier] = Task(priority: .utility) { @MainActor [weak self] in
+                await self?.requestPlayerItemDirect(for: nextVideo, allowNetwork: false)
+            }
+        }
     }
 
     func prepareReviewPreview(for asset: PHAsset, allowNetwork: Bool = false) async -> UIImage? {
+        // A video needs only a poster while PhotoKit prepares its player item.
+        // Waiting for a separate high-quality still can delay the whole review
+        // queue and compete with video startup for decoding resources.
+        if asset.mediaType == .video { return await quickPreview(for: asset) }
         if let cached = cachedReviewPreview(for: asset) { return cached }
         if !unavailableLocalReviewIDs.contains(asset.localIdentifier),
            let localImage = await reviewPreviewTask(for: asset).value { return localImage }
@@ -427,6 +496,8 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         for task in networkPreviewTasks.values { task.cancel() }
         networkPreviewTasks.removeAll()
         networkPreviewTokens.removeAll()
+        for task in localVideoItemTasks.values { task.cancel() }
+        localVideoItemTasks.removeAll()
     }
 
     /// Returns the first useful local rendition without waiting for final
@@ -609,31 +680,20 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     /// local resources; opening a cloud-only video requires an explicit tap.
     func requestPlayerItem(for asset: PHAsset, allowNetwork: Bool = false) async -> AVPlayerItem? {
         guard !Task.isCancelled else { return nil }
-
-        let options = PHVideoRequestOptions()
-        options.deliveryMode = .automatic
-        options.version = .current
-        options.isNetworkAccessAllowed = allowNetwork
-
-        let manager = PHImageManager.default()
-        let request = OneShotContinuation<AVPlayerItem?>(cancellationValue: nil)
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                guard request.install(continuation) else { return }
-                let requestID = manager.requestAVAsset(forVideo: asset, options: options) { avAsset, _, info in
-                    let isCancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
-                    let hasError = info?[PHImageErrorKey] != nil
-                    guard !isCancelled, !hasError, let avAsset else {
-                        request.resume(returning: nil)
-                        return
-                    }
-                    request.resume(returning: AVPlayerItem(asset: avAsset))
-                }
-                request.install(requestID: requestID, manager: manager)
+        if !allowNetwork, let prefetched = localVideoItemTasks.removeValue(forKey: asset.localIdentifier) {
+            return await withTaskCancellationHandler {
+                await prefetched.value
+            } onCancel: {
+                prefetched.cancel()
             }
-        } onCancel: {
-            request.cancel(using: manager)
         }
+        return await requestPlayerItemDirect(for: asset, allowNetwork: allowNetwork)
+    }
+
+    private func requestPlayerItemDirect(for asset: PHAsset, allowNetwork: Bool) async -> AVPlayerItem? {
+        // PhotoKit may synchronously prepare video metadata before returning
+        // a request ID. Keep that work away from the review buttons and swipes.
+        await VideoPreviewLoader.load(identifier: asset.localIdentifier, allowNetwork: allowNetwork)
     }
 
     /// Marks accessible, non-favorited assets as favorites in one PhotoKit
@@ -724,17 +784,30 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
 
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
         Task { @MainActor [weak self] in
-            await self?.refresh()
+            guard let self else { return }
+            if PHPhotoLibrary.authorizationStatus(for: .readWrite) != self.authorizationStatus {
+                await self.refresh()
+            } else if let assetFetchResult = self.assetFetchResult,
+               changeInstance.changeDetails(for: assetFetchResult) == nil {
+                await self.refreshAlbumsOnly()
+            } else {
+                await self.refresh()
+            }
         }
+    }
+
+    private func refreshAlbumsOnly() async {
+        albumRefreshGeneration &+= 1
+        let generation = albumRefreshGeneration
+        let refreshedAlbums = await fetchAlbums(authorizedAssets: assets, albumGeneration: generation)
+        guard !Task.isCancelled, generation == albumRefreshGeneration else { return }
+        albums = refreshedAlbums
+        revision &+= 1
     }
 
     // MARK: - Fetching
 
-    private func fetchAllAssets() async -> [PHAsset] {
-        let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        let result = PHAsset.fetchAssets(with: options)
-
+    private func fetchAllAssets(from result: PHFetchResult<PHAsset>) async -> [PHAsset] {
         var fetchedAssets: [PHAsset] = []
         fetchedAssets.reserveCapacity(result.count)
         for index in 0..<result.count {
@@ -748,7 +821,12 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         return fetchedAssets
     }
 
-    private func fetchAlbums(authorizedAssets: [PHAsset]) async -> [LibraryAlbum] {
+    private func fetchAlbums(
+        authorizedAssets: [PHAsset], albumGeneration: Int? = nil
+    ) async -> [LibraryAlbum] {
+        func isSuperseded() -> Bool {
+            albumGeneration.map { $0 != albumRefreshGeneration } ?? false
+        }
         let authorizedIdentifiers = Set(authorizedAssets.map(\.localIdentifier))
         var collections: [PHAssetCollection] = []
 
@@ -758,11 +836,11 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         ] {
             let result = PHAssetCollection.fetchAssetCollections(with: type, subtype: subtype, options: nil)
             for index in 0..<result.count {
-                guard !Task.isCancelled else { return [] }
+                guard !Task.isCancelled, !isSuperseded() else { return [] }
                 collections.append(result.object(at: index))
                 if index.isMultiple(of: 32) {
                     await Task.yield()
-                    guard !Task.isCancelled else { return [] }
+                    guard !Task.isCancelled, !isSuperseded() else { return [] }
                 }
             }
         }
@@ -771,7 +849,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         result.reserveCapacity(collections.count)
 
         for (collectionIndex, collection) in collections.enumerated() where shouldInclude(collection) {
-            guard !Task.isCancelled else { return [] }
+            guard !Task.isCancelled, !isSuperseded() else { return [] }
             let options = PHFetchOptions()
             options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
             let collectionAssets = PHAsset.fetchAssets(in: collection, options: options)
@@ -779,7 +857,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             var count = 0
             var coverIdentifier: String?
             for assetIndex in 0..<collectionAssets.count {
-                guard !Task.isCancelled else { return [] }
+                guard !Task.isCancelled, !isSuperseded() else { return [] }
                 let asset = collectionAssets.object(at: assetIndex)
                 guard authorizedIdentifiers.contains(asset.localIdentifier) else {
                     if assetIndex.isMultiple(of: 256) { await Task.yield() }
@@ -790,7 +868,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
                     coverIdentifier = asset.localIdentifier
                 }
                 if assetIndex.isMultiple(of: 256) { await Task.yield() }
-                if assetIndex.isMultiple(of: 256), Task.isCancelled { return [] }
+                if assetIndex.isMultiple(of: 256), Task.isCancelled || isSuperseded() { return [] }
             }
 
             guard count > 0 else { continue }
@@ -807,7 +885,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             )
             if collectionIndex.isMultiple(of: 8) {
                 await Task.yield()
-                guard !Task.isCancelled else { return [] }
+                guard !Task.isCancelled, !isSuperseded() else { return [] }
             }
         }
 
@@ -944,6 +1022,11 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     private func clearSnapshot() {
+        assetFetchResult = nil
+        previewAssetFingerprint = nil
+        assetSnapshotFingerprint = nil
+        suggestionAssetFingerprint = nil
+        assetRevision &+= 1
         stopReviewPrefetching()
         quickPreviewCache.removeAllObjects()
         reviewPreviewCache.removeAllObjects()
@@ -960,7 +1043,42 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     }
 }
 
-private final class OneShotContinuation<Value>: @unchecked Sendable {
+private enum VideoPreviewLoader {
+    @concurrent
+    static func load(identifier: String, allowNetwork: Bool) async -> AVPlayerItem? {
+        guard !Task.isCancelled,
+              let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject,
+              !Task.isCancelled else { return nil }
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .automatic
+        options.version = .current
+        options.isNetworkAccessAllowed = allowNetwork
+        let manager = PHImageManager.default()
+        let request = OneShotContinuation<AVPlayerItem?>(cancellationValue: nil)
+        // Local autoplay is opportunistic. A slow original should leave a
+        // poster and a manual play button instead of an indefinite spinner.
+        let timeout: Task<Void, Never>? = allowNetwork ? nil : Task {
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            request.finishEarly(returning: nil, using: manager)
+        }
+        defer { timeout?.cancel() }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard request.install(continuation) else { return }
+                let requestID = manager.requestPlayerItem(forVideo: asset, options: options) { item, info in
+                    let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
+                    request.resume(returning: cancelled || info?[PHImageErrorKey] != nil ? nil : item)
+                }
+                request.install(requestID: requestID, manager: manager)
+            }
+        } onCancel: {
+            request.cancel(using: manager)
+        }
+    }
+}
+
+final class OneShotContinuation<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Never>?
     private var requestID: PHImageRequestID?

@@ -23,6 +23,7 @@ struct ReviewQueueView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(AppSettings.self) private var settings
     @Environment(ReviewResumeStore.self) private var resume
+    @Environment(PhotoSuggestionService.self) private var suggestions
 
     @State private var queueIDs: [String] = []
     @State private var upcomingPreviewIdentifier: String?
@@ -31,7 +32,6 @@ struct ReviewQueueView: View {
     @State private var handoffPreview: UIImage?
     @State private var hasLoaded = false
     @State private var reviewSessionActive = false
-    @State private var sourceTotalCount: Int?
     @State private var index = 0
     @State private var processedCount = 0
     @State private var dragOffset: CGFloat = 0
@@ -45,10 +45,14 @@ struct ReviewQueueView: View {
     @State private var actionHistory: [QueueAction] = []
     @State private var showingInfo = false
     @State private var showingAlbumPicker = false
+    @State private var albumCarouselPosition: String?
     @State private var pendingNewAlbumRequest = false
     @State private var protectedDeletionIdentifier: String?
     @State private var showingProtectedDeletionConfirmation = false
     @State private var queueSortMode: ReviewQueueSortMode = .chronological
+    @State private var originalQueueOrder: [String] = []
+    @State private var originalQueueSortMode: ReviewQueueSortMode = .chronological
+    @State private var albumPickerAssetIdentifier: String?
     @AppStorage("com.mars.zeying.hasSeenReviewHint.v1") private var hasSeenReviewHint = false
     @State private var showingNewAlbumPrompt = false
     @State private var showingCreatedAlbumConfirmation = false
@@ -317,13 +321,15 @@ struct ReviewQueueView: View {
             ToolbarItem(placement: .topBarLeading) {
                 if sourceScope != nil, remainingCount > 1 {
                     Button {
-                        shuffleRemaining()
+                        toggleRemainingOrder()
                     } label: {
-                        Image(systemName: "shuffle")
+                        Image(systemName: queueSortMode == .shuffled ? "arrow.up.arrow.down" : "shuffle")
                     }
                     .allowsHitTesting(!actionsDisabled && !isLivePhotoPressed)
-                    .accessibilityLabel(String(localized: "随机审查本组照片与视频"))
-                    .accessibilityHint(String(localized: "只打乱当前分类中尚未处理的顺序，仍可撤销上一步"))
+                    .accessibilityLabel(queueSortMode == .shuffled
+                        ? String(localized: "恢复本组原有顺序")
+                        : String(localized: "随机审查本组照片与视频"))
+                    .accessibilityHint(String(localized: "当前照片也会切换，仍可撤销上一步"))
                 }
             }
             ToolbarItem(placement: .principal) {
@@ -389,10 +395,14 @@ struct ReviewQueueView: View {
             if pendingNewAlbumRequest {
                 pendingNewAlbumRequest = false
                 showingNewAlbumPrompt = true
+            } else {
+                albumPickerAssetIdentifier = nil
             }
         }) {
-            AlbumPickerSheet(albumService: albumService) { selection in
-                guard let asset = currentAsset else { return }
+            AlbumPickerSheet(albumService: albumService, libraryRevision: library.revision) { selection in
+                guard let identifier = albumPickerAssetIdentifier,
+                      currentAsset?.localIdentifier == identifier,
+                      let asset = library.asset(with: identifier) else { return }
                 if selection.identifier == nil {
                     newAlbumTitle = selection.title
                     pendingNewAlbumRequest = true
@@ -522,6 +532,7 @@ struct ReviewQueueView: View {
             await loadQueueIfNeeded()
         }
         .onAppear {
+            suggestions.deferAnalysisForInteraction()
             guard !reviewSessionActive else { return }
             reviewSessionActive = true
             reviews.beginInteractiveReview()
@@ -591,7 +602,11 @@ struct ReviewQueueView: View {
                 let nextAsset = upcomingAsset
                 let nextSize = nextAsset.map { fittedCardSize(for: $0, in: proxy.size) }
                 let nextImage = nextAsset.flatMap(cachedUpcomingPreview)
-                let revealDistance = max(foregroundSize.width + 120, 360)
+                let revealDistance = horizontalExitDistance(
+                    cardWidth: foregroundSize.width,
+                    cardHeight: foregroundSize.height,
+                    availableWidth: proxy.size.width
+                )
                 let verticalRevealDistance = max((proxy.size.height + foregroundSize.height) / 2 + 120, 360)
                 let nextOpacity = reduceMotion ? 0 : min(max(
                     abs(dragOffset) / revealDistance,
@@ -677,35 +692,52 @@ struct ReviewQueueView: View {
             let currentIndex = index
             let nextIdentifier = queueIDs.indices.contains(currentIndex + 1) ? queueIDs[currentIndex + 1] : nil
             upcomingPreviewIdentifier = nextIdentifier
-            upcomingPreview = upcomingAsset.flatMap {
-                library.cachedReviewPreview(for: $0)
-            }
+            let next = upcomingAsset
+            let readyPreview = next.flatMap { library.cachedReviewPreview(for: $0) }
+            upcomingPreview = readyPreview ?? next.flatMap { library.cachedQuickPreview(for: $0) }
             library.prefetchReviewPreviews(
                 prefetchCandidates(after: currentIndex),
                 keeping: asset.localIdentifier
             )
-            if upcomingPreview == nil, let next = upcomingAsset {
-                let preview = await library.prepareReviewPreview(for: next)
-                guard !Task.isCancelled else { return }
-                // Avoid replacing the image texture in the middle of a drag.
-                // If the preview arrived late, the next card can still use it
-                // through the cache when the gesture finishes.
-                if upcomingPreviewIdentifier == next.localIdentifier,
-                   !isTransitioning, dragOffset == 0, downwardOffset == 0 {
-                    upcomingPreview = preview
+            if let next {
+                async let nextSize = sizes.automaticLocalSize(for: next)
+                if readyPreview == nil {
+                    var preview = await library.prepareReviewPreview(for: next)
+                    if preview == nil, next.mediaType == .image {
+                        preview = await library.cloudThumbnail(for: next)
+                    }
+                    guard !Task.isCancelled else { return }
+                    // Avoid replacing the image texture in the middle of a drag.
+                    // If the preview arrived late, the next card can still use it
+                    // through the cache when the gesture finishes.
+                    if upcomingPreviewIdentifier == next.localIdentifier,
+                       !isTransitioning, dragOffset == 0, downwardOffset == 0 {
+                        upcomingPreview = preview
+                    }
                 }
+                _ = await nextSize
             }
         }
-        .task(id: "\(asset.localIdentifier)-\(library.revision)") {
-            let libraryRevision = library.revision
-            await albumService.loadMemberships(
-                for: asset.localIdentifier, libraryRevision: libraryRevision
-            )
-            if let nextIdentifier = upcomingAsset?.localIdentifier, !Task.isCancelled {
-                await albumService.loadMemberships(
+        .task(id: "\(asset.localIdentifier)-\(library.assetRevision)") {
+            let libraryRevision = library.assetRevision
+            let currentMembershipsReady = albumService.memberships(for: asset.localIdentifier) != nil
+            if let nextIdentifier = upcomingAsset?.localIdentifier {
+                async let nextMemberships: Void = albumService.loadMemberships(
                     for: nextIdentifier,
                     libraryRevision: libraryRevision,
                     publishChange: false
+                )
+                await albumService.loadMemberships(
+                    for: asset.localIdentifier,
+                    libraryRevision: libraryRevision,
+                    publishChange: !currentMembershipsReady
+                )
+                await nextMemberships
+            } else {
+                await albumService.loadMemberships(
+                    for: asset.localIdentifier,
+                    libraryRevision: libraryRevision,
+                    publishChange: !currentMembershipsReady
                 )
             }
         }
@@ -741,10 +773,15 @@ struct ReviewQueueView: View {
     private func albumCarousel(for asset: PHAsset) -> some View {
         let assignment = albumAssignments.assignment(for: asset.localIdentifier)
         let memberships = albumService.memberships(for: asset.localIdentifier)
-        let memberIdentifiers = Set(memberships?.map(\.id) ?? [])
+        let membershipsByIdentifier = Dictionary(uniqueKeysWithValues: (memberships ?? []).map { ($0.id, $0) })
+        let availableIdentifiers = Set(albumService.frequentlyUsedFirst.map(\.id))
+        let otherMemberships = (memberships ?? []).filter { !availableIdentifiers.contains($0.id) }
+            .map { PhotoAlbumOption(id: $0.id, title: $0.title, count: nil) }
+        let carouselAlbums = albumService.frequentlyUsedFirst + otherMemberships
         return HStack(spacing: 0) {
             Button {
-                guard !actionsDisabled else { return }
+                guard !actionsDisabled, currentAsset?.localIdentifier == asset.localIdentifier else { return }
+                albumPickerAssetIdentifier = asset.localIdentifier
                 showingAlbumPicker = true
             } label: {
                 Text(String(localized: "相簿列表"))
@@ -759,7 +796,7 @@ struct ReviewQueueView: View {
             .fixedSize(horizontal: true, vertical: false)
 
             Button {
-                guard !actionsDisabled else { return }
+                guard !actionsDisabled, currentAsset?.localIdentifier == asset.localIdentifier else { return }
                 newAlbumTitle = ""
                 showingNewAlbumPrompt = true
             } label: {
@@ -774,83 +811,73 @@ struct ReviewQueueView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 6) {
-                    if memberships == nil {
+                    if carouselAlbums.isEmpty && memberships == nil {
                         Text(String(localized: "正在读取相簿…"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .frame(height: 44)
                     }
-                    if let memberships {
-                        if memberships.isEmpty && albumService.frequentlyUsedFirst.isEmpty {
-                            Text(String(localized: "暂无相簿"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(height: 44)
-                        }
-                        ForEach(memberships) { album in
-                            Button {
-                                guard !actionsDisabled else { return }
+                    if carouselAlbums.isEmpty && memberships != nil {
+                        Text(String(localized: "暂无相簿"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(height: 44)
+                    }
+                    // Keep one identity and position per album across photos.
+                    // Membership changes only its badge/action, never its row.
+                    ForEach(carouselAlbums) { album in
+                        let membership = membershipsByIdentifier[album.id]
+                        let isPending = assignment?.albumIdentifier == album.id
+                        let isHighlighted = membership != nil || isPending
+                        Button {
+                            guard !actionsDisabled, memberships != nil,
+                                  currentAsset?.localIdentifier == asset.localIdentifier else { return }
+                            if membership != nil {
                                 albumRemovalTarget = AlbumRemovalTarget(
                                     assetIdentifier: asset.localIdentifier,
                                     albumIdentifier: album.id,
                                     albumTitle: album.title
                                 )
                                 showingAlbumRemovalConfirmation = true
-                            } label: {
-                                Label(album.title, systemImage: "checkmark")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(Color.accentColor)
-                                    .padding(.horizontal, 11)
-                                    .frame(height: 30)
-                                    .background(Color.accentColor.opacity(0.14), in: Capsule())
-                                    .frame(height: 44)
-                                    .contentShape(Rectangle())
+                            } else if isPending {
+                                cancelPendingAlbumSelection(for: asset)
+                            } else {
+                                stageAlbumSelection(
+                                    PhotoAlbumSelection(identifier: album.id, title: album.title),
+                                    for: asset
+                                )
                             }
-                            .buttonStyle(.plain)
-                            .disabled(!album.canRemove || isUpdatingLibrary)
-                            .accessibilityLabel(album.canRemove
+                        } label: {
+                            HStack(spacing: 4) {
+                                if membership != nil { Image(systemName: "checkmark") }
+                                else if isPending { Image(systemName: "clock") }
+                                Text(album.title)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(isHighlighted ? Color.accentColor : Color.primary)
+                            .padding(.horizontal, 11)
+                            .frame(height: 30)
+                            .background(isHighlighted ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06),
+                                        in: Capsule())
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(memberships == nil || isUpdatingLibrary || membership?.canRemove == false)
+                        .accessibilityLabel(membership.map {
+                            $0.canRemove
                                 ? String(localized: "已在相簿 \(album.title)，点按可移除")
-                                : String(localized: "已在相簿 \(album.title)"))
-                        }
-
-                        ForEach(albumService.frequentlyUsedFirst.filter { !memberIdentifiers.contains($0.id) }) { album in
-                            let isPending = assignment?.albumIdentifier == album.id
-                            Button {
-                                guard !actionsDisabled else { return }
-                                if isPending {
-                                    cancelPendingAlbumSelection(for: asset)
-                                } else {
-                                    stageAlbumSelection(
-                                        PhotoAlbumSelection(identifier: album.id, title: album.title),
-                                        for: asset
-                                    )
-                                }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    if isPending { Image(systemName: "clock") }
-                                    Text(album.title)
-                                        .fixedSize(horizontal: true, vertical: false)
-                                }
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(isPending ? Color.accentColor : Color.primary)
-                                .padding(.horizontal, 11)
-                                .frame(height: 30)
-                                .background(isPending ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06),
-                                            in: Capsule())
-                                .frame(height: 44)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(isUpdatingLibrary)
-                            .accessibilityLabel(isPending
+                                : String(localized: "已在相簿 \(album.title)")
+                        } ?? (isPending
                                 ? String(localized: "待加入相簿 \(album.title)，点按可取消")
-                                : String(localized: "加入相簿 \(album.title)"))
-                        }
-
+                                : String(localized: "加入相簿 \(album.title)")))
                     }
                 }
+                .scrollTargetLayout()
                 .padding(.trailing, 7)
             }
+            .scrollPosition(id: $albumCarouselPosition)
         }
         .frame(height: 44)
         .zeyingGlass(in: RoundedRectangle(cornerRadius: 17, style: .continuous))
@@ -881,6 +908,7 @@ struct ReviewQueueView: View {
                 initialPreview: handoffPreviewIdentifier == asset.localIdentifier ? handoffPreview : nil,
                 requiresFullQuality: true,
                 autoplayVideo: true,
+                isActive: !isTransitioning,
                 isLivePhotoPressed: isLivePhotoPressed
             )
                 .scaleEffect(asset.mediaType == .image ? previewScale : 1)
@@ -894,11 +922,6 @@ struct ReviewQueueView: View {
         .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .shadow(
-            color: .black.opacity(reduceMotion ? 0.12 : 0.18),
-            radius: reduceMotion ? 10 : 16,
-            y: reduceMotion ? 5 : 9
-        )
         // Apply the transform after clipping so the complete rounded card can
         // leave the viewport as one physical surface.
             .offset(x: dragOffset, y: downwardOffset)
@@ -937,17 +960,22 @@ struct ReviewQueueView: View {
         return min(max(Double(dragOffset / cardWidth) * 14, -14), 14)
     }
 
+    private func horizontalExitDistance(
+        cardWidth: CGFloat, cardHeight: CGFloat, availableWidth: CGFloat
+    ) -> CGFloat {
+        // Offset precedes rotation in the card's view modifiers, so its
+        // translation is rotated too. Include the projected portrait height.
+        let angle = CGFloat(14) * .pi / 180
+        let rotatedHalfWidth = (cardWidth * cos(angle) + cardHeight * sin(angle)) / 2
+        return (availableWidth / 2 + rotatedHalfWidth + 32) / cos(angle)
+    }
+
     private var progressHeader: some View {
         VStack(spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("\(min(index + 1, max(queueIDs.count, 1))) / \(queueIDs.count)")
                     .font(.subheadline.weight(.semibold).monospacedDigit())
                 Spacer()
-                if let sourceTotalCount {
-                    Text(String(localized: "本组 \(sourceTotalCount) 项"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 Text(String(localized: "剩余 \(remainingCount)"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1313,21 +1341,24 @@ struct ReviewQueueView: View {
     private func loadQueueIfNeeded() async {
         guard !hasLoaded else { return }
         await library.ensureLoaded()
-        albumService.refresh()
+        albumService.refreshIfNeeded(libraryRevision: library.revision)
 
         let identifiers: [String]
+        var naturalOrder: [String] = []
         var initialIndex = 0
         if let explicitAssetIDs {
             identifiers = explicitAssetIDs
+            naturalOrder = explicitAssetIDs
         } else if sourceScope == .later {
             identifiers = reviews.identifiers(with: .later)
+            naturalOrder = identifiers
         } else if let sourceScope {
             let scopedAssets = library.assets(in: sourceScope)
-            sourceTotalCount = scopedAssets.count
             let ordered = sourceScope == .random ? scopedAssets.shuffled() : Array(scopedAssets.reversed())
             queueSortMode = sourceScope == .random ? .random : .chronological
             let reviewed = reviews.reviewedIdentifiers(among: ordered.map(\.localIdentifier))
             let unreviewed = ordered.filter { reviews.decision(for: $0.localIdentifier) == nil }
+            naturalOrder = reviewed + unreviewed.map(\.localIdentifier)
             if unreviewed.isEmpty {
                 // A finished month reopens at its first capture, rather than
                 // landing on the last reviewed photo.
@@ -1357,6 +1388,10 @@ struct ReviewQueueView: View {
         queueIDs = identifiers.filter {
             library.asset(with: $0) != nil && seenIdentifiers.insert($0).inserted
         }
+        let queuedIdentifiers = Set(queueIDs)
+        originalQueueOrder = naturalOrder.filter { queuedIdentifiers.contains($0) }
+        if originalQueueOrder.count != queueIDs.count { originalQueueOrder = queueIDs }
+        originalQueueSortMode = sourceScope == .random ? .random : .chronological
         index = min(initialIndex, max(queueIDs.count - 1, 0))
         guard !Task.isCancelled else { return }
         if queueIDs.indices.contains(index) {
@@ -1366,12 +1401,12 @@ struct ReviewQueueView: View {
                 keeping: firstIdentifier
             )
             // Do not reveal a thumbnail that has to sharpen on screen.
-            if let first = library.asset(with: firstIdentifier) {
+            if let first = library.asset(with: firstIdentifier), first.mediaType != .video {
                 _ = await library.prepareReviewPreview(for: first)
-            }
-            if queueIDs.indices.contains(index + 1),
-               let second = library.asset(with: queueIDs[index + 1]) {
-                _ = await library.prepareReviewPreview(for: second)
+                if queueIDs.indices.contains(index + 1),
+                   let second = library.asset(with: queueIDs[index + 1]), second.mediaType != .video {
+                    _ = await library.prepareReviewPreview(for: second)
+                }
             }
         }
         guard !Task.isCancelled else { return }
@@ -1398,22 +1433,36 @@ struct ReviewQueueView: View {
         resume.remember(scope: sourceScope, containing: asset.creationDate)
     }
 
-    private func shuffleRemaining() {
+    private func toggleRemainingOrder() {
         guard sourceScope != nil, remainingCount > 1,
               !isTransitioning, !isPreparingShare, !isUpdatingLibrary, !isLivePhotoPressed else { return }
 
-        var remaining = Array(queueIDs[(index + 1)...])
-        remaining.shuffle()
+        let remaining = Array(queueIDs[index...])
+        let reordered: [String]
+        let nextSortMode: ReviewQueueSortMode
+        if queueSortMode == .shuffled {
+            reordered = ReviewQueueOrdering.restored(remaining, originalOrder: originalQueueOrder)
+            nextSortMode = originalQueueSortMode
+        } else {
+            reordered = ReviewQueueOrdering.shuffled(remaining)
+            nextSortMode = .shuffled
+        }
 
         // Earlier indices remain untouched, so every undo token still points
         // to the photo on which the original decision was made.
-        upcomingPreviewIdentifier = nil
-        upcomingPreview = nil
-        dragOffset = 0
-        downwardOffset = 0
-        swipeAxis = nil
-        queueIDs.replaceSubrange((index + 1)..<queueIDs.count, with: remaining)
-        queueSortMode = .shuffled
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            upcomingPreviewIdentifier = nil
+            upcomingPreview = nil
+            handoffPreviewIdentifier = nil
+            handoffPreview = nil
+            dragOffset = 0
+            downwardOffset = 0
+            swipeAxis = nil
+            queueIDs.replaceSubrange(index..<queueIDs.count, with: reordered)
+            queueSortMode = nextSortMode
+        }
         if let sourceScope {
             resume.rememberQueue(scope: sourceScope, assetIDs: queueIDs, position: index, sortMode: queueSortMode)
             presentResumeErrorIfNeeded()
@@ -1564,6 +1613,7 @@ struct ReviewQueueView: View {
     private func perform(_ decision: ReviewDecision, bypassFavoriteProtection: Bool = false) {
         guard !isTransitioning, !isPreparingShare, !isUpdatingLibrary,
               let currentAsset else { return }
+        suggestions.deferAnalysisForInteraction()
         if decision == .delete, !bypassFavoriteProtection, settings.protectFavoritesEnabled,
            currentAsset.isFavorite || reviews.isPendingFavorite(currentAsset.localIdentifier) {
             protectedDeletionIdentifier = currentAsset.localIdentifier
@@ -1610,43 +1660,54 @@ struct ReviewQueueView: View {
     }
 
     private func stageAlbumSelection(_ selection: PhotoAlbumSelection, for asset: PHAsset) {
-        guard !isTransitioning, !isPreparingShare, !isUpdatingLibrary else { return }
-        let previousAlbumAssignment = albumAssignmentSnapshot(for: asset.localIdentifier)
-        guard albumAssignments.assign(
-            assetIdentifier: asset.localIdentifier,
-            albumIdentifier: selection.identifier,
-            albumTitle: selection.title
-        ) else {
-            operationError = albumAssignments.errorMessage ?? String(localized: "无法暂存相簿整理。")
-            showingError = true
-            return
-        }
-
-        // An album target is a keep action. Persist the keep state alongside
-        // the independent album assignment so every entry point agrees.
-        guard reviews.decide(.keep, for: asset.localIdentifier) else {
-            _ = restoreAlbumAssignment(previousAlbumAssignment, for: asset.localIdentifier)
-            showingError = true
-            return
-        }
+        guard !isTransitioning, !isPreparingShare, !isUpdatingLibrary,
+              currentAsset?.localIdentifier == asset.localIdentifier else { return }
+        let identifier = asset.localIdentifier
+        let indexBefore = index
+        let previousAlbumAssignment = albumAssignmentSnapshot(for: identifier)
         emitDecisionHaptic()
-        if let undoToken = reviews.latestUndoToken {
-            actionHistory.append(
-                QueueAction(
-                    indexBefore: index,
+        newAlbumTitle = ""
+        playDecisionExit(for: .keep) {
+            guard queueIDs.indices.contains(indexBefore), queueIDs[indexBefore] == identifier else { return false }
+            guard albumAssignments.assign(
+                assetIdentifier: identifier,
+                albumIdentifier: selection.identifier,
+                albumTitle: selection.title
+            ) else {
+                operationError = albumAssignments.errorMessage ?? String(localized: "无法暂存相簿整理。")
+                showingError = true
+                return false
+            }
+            // An album target also keeps the asset. Commit after the card has
+            // left the screen so SwiftData I/O cannot stall the exit frame.
+            guard reviews.decide(.keep, for: identifier) else {
+                _ = restoreAlbumAssignment(previousAlbumAssignment, for: identifier)
+                showingError = true
+                return false
+            }
+            if let albumIdentifier = selection.identifier {
+                // Keep the chosen album visible even if its new use count
+                // moves it earlier in the list. This position belongs to the
+                // review session, not to an individual photo.
+                albumCarouselPosition = albumIdentifier
+                albumService.recordSelection(of: albumIdentifier)
+            }
+            if let undoToken = reviews.latestUndoToken {
+                actionHistory.append(QueueAction(
+                    indexBefore: indexBefore,
                     undoToken: undoToken,
                     previousAlbumAssignment: previousAlbumAssignment,
                     selectedAlbumIdentifier: selection.identifier
-                )
-            )
+                ))
+            }
+            processedCount += 1
+            return true
         }
-        processedCount += 1
-        newAlbumTitle = ""
-        playDecisionExit(for: .keep)
     }
 
     private func cancelPendingAlbumSelection(for asset: PHAsset) {
-        guard !isTransitioning, !isPreparingShare, !isUpdatingLibrary else { return }
+        guard !isTransitioning, !isPreparingShare, !isUpdatingLibrary,
+              currentAsset?.localIdentifier == asset.localIdentifier else { return }
         guard albumAssignments.remove(assetIdentifier: asset.localIdentifier) else {
             operationError = albumAssignments.errorMessage ?? String(localized: "无法取消相簿整理。")
             showingError = true
@@ -1765,9 +1826,7 @@ struct ReviewQueueView: View {
                     albumAssignments.errorMessage ?? String(localized: "照片已从相簿移除，但本地待办未能更新。")
                 )
             }
-            await albumService.loadMemberships(
-                for: target.assetIdentifier, libraryRevision: library.revision
-            )
+            albumRemovalTarget = nil
             emitDecisionHaptic()
         } catch {
             operationError = PhotosFailureMessage.message(for: error)
@@ -1916,11 +1975,11 @@ struct ReviewQueueView: View {
                 downwardOffset = max(downwardOffset + 160, exitDistance)
             } else {
                 let direction: CGFloat = decision == .delete ? -1 : 1
-                // The offset is rotated with the card. A tall portrait card
-                // needs more travel than its width to clear the screen edge.
-                let angle = CGFloat(14) * .pi / 180
-                let rotatedHalfWidth = (cardWidth * cos(angle) + cardHeight * sin(angle)) / 2
-                let exitDistance = (cardAreaWidth / 2 + rotatedHalfWidth + 32) / cos(angle)
+                let exitDistance = horizontalExitDistance(
+                    cardWidth: cardWidth,
+                    cardHeight: cardHeight,
+                    availableWidth: cardAreaWidth
+                )
                 dragOffset = direction * max(abs(dragOffset) + 160, exitDistance)
             }
         } completion: {
@@ -1957,6 +2016,7 @@ struct ReviewQueueView: View {
         let visiblePreview = upcomingPreviewIdentifier == next.localIdentifier ? upcomingPreview : nil
         handoffPreview = visiblePreview
             ?? library.cachedReviewPreview(for: next)
+            ?? library.cachedQuickPreview(for: next)
     }
 
     private func emitDecisionHaptic() {

@@ -513,9 +513,6 @@ struct ReviewSummaryView: View {
     private func commitAlbumAssignments() async {
         let requested = albumItems
         guard !requested.isEmpty else { return }
-        let existingAlbumByAsset = Dictionary(uniqueKeysWithValues: requested.compactMap { assignment in
-            assignment.albumIdentifier.map { (assignment.assetIdentifier, $0) }
-        })
         isCommitting = true
         defer { isCommitting = false }
 
@@ -535,7 +532,9 @@ struct ReviewSummaryView: View {
                         title: title,
                         for: assetIdentifiers
                     )
-                    if saved { albumService.recordSelection(of: identifier) }
+                    if saved {
+                        for _ in assetIdentifiers { albumService.recordSelection(of: identifier) }
+                    }
                     return saved
                 }
             )
@@ -543,11 +542,6 @@ struct ReviewSummaryView: View {
                 operationError = albumAssignments.errorMessage ?? String(localized: "无法清除已完成的相簿整理记录。")
                 showingError = true
                 return
-            }
-            for assetIdentifier in result.appliedIdentifiers {
-                if let albumIdentifier = existingAlbumByAsset[assetIdentifier] {
-                    albumService.recordSelection(of: albumIdentifier)
-                }
             }
             if !result.failedIdentifiers.isEmpty || result.errorMessage != nil {
                 let detail = result.errorMessage ?? String(localized: "部分项目未能加入相簿。")

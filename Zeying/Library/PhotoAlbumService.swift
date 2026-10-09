@@ -2,14 +2,6 @@
 import Foundation
 import Observation
 
-struct PhotoAlbumOption: Identifiable, Hashable {
-    let id: String
-    let title: String
-    /// PhotoKit's estimate can be unavailable for an album.  Keep it
-    /// optional so refreshing the picker never has to scan every album.
-    let count: Int?
-}
-
 struct PhotoAlbumMembership: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
@@ -61,15 +53,16 @@ enum PhotoAlbumServiceError: LocalizedError {
 @MainActor
 @Observable
 final class PhotoAlbumService {
-    private static let albumUseKey = "com.mars.zeying.albumSelectionCounts.v1"
     private static let newlyCreatedAlbumKey = "com.mars.zeying.newlyCreatedAlbum.v1"
     private let photoLibrary = PHPhotoLibrary.shared()
     @ObservationIgnored private let defaults = UserDefaults.standard
-    @ObservationIgnored private var selectionCounts: [String: Int] =
-        UserDefaults.standard.dictionary(forKey: PhotoAlbumService.albumUseKey) as? [String: Int] ?? [:]
+    @ObservationIgnored private let selectionHistory = AlbumSelectionHistory()
     @ObservationIgnored private var membershipsByAsset: [String: [PhotoAlbumMembership]] = [:]
+    @ObservationIgnored private var membershipLoads: [String: MembershipLoad] = [:]
+    @ObservationIgnored private var publishedMemberships: Set<String> = []
     @ObservationIgnored private var membershipGeneration = 0
     @ObservationIgnored private var membershipLibraryRevision: Int?
+    @ObservationIgnored private var lastRefreshedLibraryRevision: Int?
     @ObservationIgnored private var newlyCreatedAlbumIdentifier: String? =
         UserDefaults.standard.string(forKey: PhotoAlbumService.newlyCreatedAlbumKey)
 
@@ -77,6 +70,11 @@ final class PhotoAlbumService {
     private(set) var frequentlyUsedFirst: [PhotoAlbumOption] = []
     private(set) var revision = 0
     private(set) var membershipRevision = 0
+
+    private struct MembershipLoad {
+        let token: UUID
+        let task: Task<[PhotoAlbumMembership], Never>
+    }
 
     func memberships(for assetIdentifier: String) -> [PhotoAlbumMembership]? {
         _ = membershipRevision
@@ -94,60 +92,79 @@ final class PhotoAlbumService {
             invalidateMemberships()
             membershipLibraryRevision = libraryRevision
         }
-        guard membershipsByAsset[assetIdentifier] == nil else { return }
-        let generation = membershipGeneration
-        let memberships = await Task.detached(priority: .userInitiated) {
-            guard let asset = PHAsset.fetchAssets(
-                withLocalIdentifiers: [assetIdentifier], options: nil
-            ).firstObject else { return [PhotoAlbumMembership]() }
-            let result = PHAssetCollection.fetchAssetCollectionsContaining(
-                asset, with: .album, options: nil
-            )
-            var found: [PhotoAlbumMembership] = []
-            for index in 0..<result.count {
-                let collection = result.object(at: index)
-                guard collection.assetCollectionSubtype == .albumRegular,
-                      let title = collection.localizedTitle, !title.isEmpty else { continue }
-                found.append(PhotoAlbumMembership(
-                    id: collection.localIdentifier,
-                    title: title,
-                    canRemove: collection.canPerform(.removeContent)
-                ))
+        guard membershipsByAsset[assetIdentifier] == nil else {
+            if publishChange, publishedMemberships.insert(assetIdentifier).inserted {
+                membershipRevision += 1
             }
-            return found.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        }.value
-        guard generation == membershipGeneration, !Task.isCancelled else { return }
-        membershipsByAsset[assetIdentifier] = memberships
+            return
+        }
+        let generation = membershipGeneration
+        let load: MembershipLoad
+        if let existing = membershipLoads[assetIdentifier] {
+            load = existing
+        } else {
+            load = MembershipLoad(token: UUID(), task: Task.detached(priority: .userInitiated) {
+                guard let asset = PHAsset.fetchAssets(
+                    withLocalIdentifiers: [assetIdentifier], options: nil
+                ).firstObject else { return [PhotoAlbumMembership]() }
+                let result = PHAssetCollection.fetchAssetCollectionsContaining(
+                    asset, with: .album, options: nil
+                )
+                var found: [PhotoAlbumMembership] = []
+                for index in 0..<result.count {
+                    let collection = result.object(at: index)
+                    guard collection.assetCollectionSubtype == .albumRegular,
+                          let title = collection.localizedTitle, !title.isEmpty else { continue }
+                    found.append(PhotoAlbumMembership(
+                        id: collection.localIdentifier,
+                        title: title,
+                        canRemove: collection.canPerform(.removeContent)
+                    ))
+                }
+                return found.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+            })
+            membershipLoads[assetIdentifier] = load
+        }
+        let memberships = await load.task.value
+        guard generation == membershipGeneration else { return }
+        if membershipLoads[assetIdentifier]?.token == load.token {
+            membershipLoads.removeValue(forKey: assetIdentifier)
+            membershipsByAsset[assetIdentifier] = memberships
+        }
+        guard membershipsByAsset[assetIdentifier] != nil else { return }
         // The next card is prefetched in the background. Publishing that
         // result while the current card is moving invalidates its whole view.
-        if publishChange { membershipRevision += 1 }
+        if publishChange && !Task.isCancelled,
+           publishedMemberships.insert(assetIdentifier).inserted {
+            membershipRevision += 1
+        }
     }
 
     private func invalidateMemberships() {
+        for load in membershipLoads.values { load.task.cancel() }
+        membershipLoads.removeAll()
         membershipsByAsset.removeAll()
+        publishedMemberships.removeAll()
         membershipGeneration += 1
         membershipRevision += 1
     }
 
     private func orderByRecentUse() -> [PhotoAlbumOption] {
-        albums.sorted { left, right in
-            if left.id == newlyCreatedAlbumIdentifier { return true }
-            if right.id == newlyCreatedAlbumIdentifier { return false }
-            let leftCount = selectionCounts[left.id, default: 0]
-            let rightCount = selectionCounts[right.id, default: 0]
-            if leftCount != rightCount { return leftCount > rightCount }
-            let ordering = left.title.localizedStandardCompare(right.title)
-            return ordering == .orderedSame ? left.id < right.id : ordering == .orderedAscending
-        }
+        selectionHistory.ordered(albums, newlyCreatedIdentifier: newlyCreatedAlbumIdentifier)
+    }
+
+    func importPendingSelectionsIfNeeded(_ assignments: [PendingAlbumAssignment]) {
+        selectionHistory.importPendingSelectionsIfNeeded(assignments.compactMap(\.albumIdentifier))
+        frequentlyUsedFirst = orderByRecentUse()
+        revision += 1
     }
 
     func recordSelection(of albumIdentifier: String) {
-        selectionCounts[albumIdentifier, default: 0] += 1
+        selectionHistory.recordSelection(of: albumIdentifier)
         if newlyCreatedAlbumIdentifier != albumIdentifier {
             newlyCreatedAlbumIdentifier = nil
             defaults.removeObject(forKey: Self.newlyCreatedAlbumKey)
         }
-        defaults.set(selectionCounts, forKey: Self.albumUseKey)
         frequentlyUsedFirst = orderByRecentUse()
         revision += 1
     }
@@ -192,6 +209,12 @@ final class PhotoAlbumService {
         }
         frequentlyUsedFirst = orderByRecentUse()
         revision += 1
+    }
+
+    func refreshIfNeeded(libraryRevision: Int) {
+        guard lastRefreshedLibraryRevision != libraryRevision else { return }
+        refresh()
+        lastRefreshedLibraryRevision = libraryRevision
     }
 
     /// Create a real Photos album before asking whether to add the current asset.
@@ -260,7 +283,7 @@ final class PhotoAlbumService {
             throw AlbumOperationError.albumUnavailable
         }
         guard Self.contains(asset, in: collection) else {
-            invalidateMemberships()
+            removeCachedMembership(albumIdentifier, from: assetIdentifier)
             return
         }
         guard collection.canPerform(.removeContent) else {
@@ -275,7 +298,16 @@ final class PhotoAlbumService {
         guard !Self.contains(asset, in: collection) else {
             throw AlbumOperationError.removalUnconfirmed
         }
-        invalidateMemberships()
+        removeCachedMembership(albumIdentifier, from: assetIdentifier)
+    }
+
+    private func removeCachedMembership(_ albumIdentifier: String, from assetIdentifier: String) {
+        membershipLoads.removeValue(forKey: assetIdentifier)?.task.cancel()
+        guard var memberships = membershipsByAsset[assetIdentifier] else { return }
+        memberships.removeAll { $0.id == albumIdentifier }
+        membershipsByAsset[assetIdentifier] = memberships
+        publishedMemberships.insert(assetIdentifier)
+        membershipRevision += 1
     }
 
     private static func contains(_ asset: PHAsset, in collection: PHAssetCollection) -> Bool {

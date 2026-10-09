@@ -49,6 +49,7 @@ private final class AppState {
             reviews = ReviewStore(context: container.mainContext)
             let assignments = PendingAlbumAssignmentStore(context: ModelContext(container))
             albumAssignments = assignments
+            albumService.importPendingSelectionsIfNeeded(assignments.assignments)
             startupError = nil
             suggestions.setAlbumAssignments(assignments)
             if let reviews {

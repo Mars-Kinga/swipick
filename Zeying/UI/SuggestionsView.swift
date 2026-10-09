@@ -33,21 +33,24 @@ struct SuggestionsView: View {
             return a == b ? left.offset < right.offset : a < b
         }.map(\.element)
     }
-    private var filteredGroups: [CleanupSuggestion] { groups.filter { filter == nil || $0.kind == filter } }
-    private var resumedGroups: [CleanupSuggestion] {
-        if !shuffledGroupIDs.isEmpty { return [] }
-        let lookup = Dictionary(uniqueKeysWithValues: filteredGroups.map { ($0.id, $0) })
-        return suggestions.resumeGroupIDs.compactMap { lookup[$0] }
-    }
-
     var body: some View {
+        let allGroups = groups
+        let filteredGroups = allGroups.filter { filter == nil || $0.kind == filter }
+        let resumedGroups: [CleanupSuggestion] = {
+            guard shuffledGroupIDs.isEmpty else { return [] }
+            let lookup = Dictionary(uniqueKeysWithValues: filteredGroups.map { ($0.id, $0) })
+            return suggestions.resumeGroupIDs.compactMap { lookup[$0] }
+        }()
+        let visiblePhotoCount = Set(allGroups.flatMap {
+            suggestions.visibleAssetIDs(in: $0, library: library, reviews: reviews)
+        }).count
         List {
             Section {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(String(localized: "\(groups.count) 组建议 · \(Set(groups.flatMap { suggestions.visibleAssetIDs(in: $0, library: library, reviews: reviews) }).count) 张照片"))
+                    Text(String(localized: "\(allGroups.count) 组建议 · \(visiblePhotoCount) 张照片"))
                         .font(.headline)
                         .monospacedDigit()
-                    scanStatus
+                    SuggestionScanStatusView(library: library, reviews: reviews)
                 }
                 .padding(.vertical, 4)
             }
@@ -103,7 +106,7 @@ struct SuggestionsView: View {
                 Button {
                     withAnimation(reduceMotion ? nil : .snappy) {
                         if shuffledGroupIDs.isEmpty {
-                            let original = groups.map(\.id)
+                            let original = allGroups.map(\.id)
                             var shuffled = original.shuffled()
                             if shuffled == original, shuffled.count >= 2 { shuffled.swapAt(0, 1) }
                             shuffledGroupIDs = shuffled
@@ -112,7 +115,7 @@ struct SuggestionsView: View {
                         }
                     }
                 } label: { Image(systemName: shuffledGroupIDs.isEmpty ? "shuffle" : "arrow.up.arrow.down") }
-                .disabled(shuffledGroupIDs.isEmpty && groups.count < 2)
+                .disabled(shuffledGroupIDs.isEmpty && allGroups.count < 2)
                 .accessibilityLabel(String(localized: shuffledGroupIDs.isEmpty ? "随机排列建议" : "恢复推荐顺序"))
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -256,7 +259,10 @@ struct SuggestionsView: View {
     }
 
     private var suggestionDetails: String {
-        var details = [categoryExplanation]
+        var details = [
+            categoryExplanation,
+            String(localized: "清理建议在设备上生成，分析过程无需将照片发送到外部服务。")
+        ]
         if library.authorizationStatus == .limited {
             details.append(String(localized: "建议仅来自当前获准访问的照片。"))
         }
@@ -264,38 +270,6 @@ struct SuggestionsView: View {
             details.append(error)
         }
         return details.joined(separator: "\n\n")
-    }
-
-    @ViewBuilder
-    private var scanStatus: some View {
-        if suggestions.isScanning {
-            if let percent = suggestions.scanProgressPercent {
-                Text(String(format: String(localized: "正在检查你的照片… %d%%"), percent))
-                    .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-            } else {
-                Text(String(localized: "正在检查你的照片…"))
-                    .font(.subheadline).foregroundStyle(.secondary)
-            }
-        } else if suggestions.isManuallyPaused {
-            Text(String(localized: "照片检查已暂停。"))
-                .font(.subheadline).foregroundStyle(.secondary)
-            Button(String(localized: "继续分析"), systemImage: "play") {
-                suggestions.start(library: library, reviews: reviews)
-            }
-            .font(.subheadline)
-        } else if suggestions.isEnergyPaused {
-            Text(String(localized: "设备温度较高，降温后会继续检查照片。"))
-                .font(.subheadline).foregroundStyle(.secondary)
-        } else if !suggestions.hasScanned {
-            if let percent = suggestions.scanProgressPercent, percent > 0 {
-                Text(String(format: String(localized: "已检查到 %d%%，等待继续。"), percent))
-                    .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-            }
-            Button(String(localized: "继续分析"), systemImage: "play") {
-                suggestions.start(library: library, reviews: reviews)
-            }
-            .font(.subheadline)
-        }
     }
 
     private var emptyContent: some View {
@@ -334,6 +308,45 @@ struct SuggestionsView: View {
     }
 }
 
+private struct SuggestionScanStatusView: View {
+    let library: PhotoLibraryService
+    let reviews: ReviewStore
+    @Environment(PhotoSuggestionService.self) private var suggestions
+
+    var body: some View {
+        Group {
+            if suggestions.isScanning {
+                if let percent = suggestions.scanProgressPercent {
+                    Text(String(format: String(localized: "正在检查你的照片… %d%%"), percent))
+                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                } else {
+                    Text(String(localized: "正在检查你的照片…"))
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            } else if suggestions.isManuallyPaused {
+                Text(String(localized: "照片检查已暂停。"))
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Button(String(localized: "继续分析"), systemImage: "play") {
+                    suggestions.start(library: library, reviews: reviews)
+                }
+                .font(.subheadline)
+            } else if suggestions.isEnergyPaused {
+                Text(String(localized: "设备温度较高，降温后会继续检查照片。"))
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if !suggestions.hasScanned {
+                if let percent = suggestions.scanProgressPercent, percent > 0 {
+                    Text(String(format: String(localized: "已检查到 %d%%，等待继续。"), percent))
+                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                }
+                Button(String(localized: "继续分析"), systemImage: "play") {
+                    suggestions.start(library: library, reviews: reviews)
+                }
+                .font(.subheadline)
+            }
+        }
+    }
+}
+
 private struct SuggestionRow: View {
     let group: CleanupSuggestion
     let library: PhotoLibraryService
@@ -357,7 +370,7 @@ private struct SuggestionRow: View {
                     ForEach(Array(ids.prefix(photoCount)), id: \.self) { id in
                         if let asset = library.asset(with: id) {
                             AssetImageView(asset: asset, library: library, contentMode: .fill,
-                                           targetSize: CGSize(width: 480, height: 480),
+                                           targetSize: CGSize(width: 240, height: 240),
                                            requiresFullQuality: group.kind == .similar)
                                 .frame(width: tileSize, height: tileSize)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))

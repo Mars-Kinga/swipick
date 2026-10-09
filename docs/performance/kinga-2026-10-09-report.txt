@@ -1,0 +1,72 @@
+择影在 Kinga 上的性能观察 — 2026-10-09（北京时间）
+
+结论：持续整理照片且自动扫描建议时，出现持续较高热压力和可见的主线程停顿。
+CPU 和主线程负担需要优化；当前短时记录不足以判定内存泄漏。
+
+设备与场景
+  Kinga，iPhone 15 Pro Max，iOS 27.0 (24A435)，6 核 CPU。
+  Swipick 1.0 (1)，Xcode 调试运行；用户持续整理照片，自动建议扫描同时运行。
+  连续 Time Profiler 记录：18:44:27.658 至 18:45:08.241，40.583514 秒。
+  本次没有重启或替换手机上的应用；后续修复尚未安装到手机。
+
+实测与估算
+  CPU：39,034 个采样，估算 CPU 时间 39.034 秒，平均占用 96.18%。
+  100% 表示一个核心；这台设备总上限为 600%，不能把 96% 理解为全机接近满载。
+  完整一秒窗口的最高占用估算为 201.9%；Xcode 调试会话记录峰值为 208%。
+  主线程 CPU：14.931 秒，占应用 CPU 采样权重约 38.25%。
+  停顿：potential-hangs 表记录 13 次，单次 413～1,006 毫秒，6 次超过 500 毫秒。
+  停顿合计约 7.343 秒，占记录时间约 18.1%。该指标不等同于掉帧率。
+  温度：整段 40.58 秒均为 Serious；后续照片整理中的温度图仍显示 Serious。
+  内存：Xcode 会话峰值 598.9 MB，最低 89.5 MB；19:10 左右的快照约 504～526 MB。
+  最新快照 CPU 约 26～56%，Energy Impact 为 High，磁盘约 2.2～8.4 MB/s。
+  曾在设备锁定后回落至约 201 MB；这不是前台空闲基线。没有执行 Allocations/Leaks，不能排除泄漏。
+  能耗：Xcode 的相对 Energy Impact 在 Low 与 High 间变化，后续整理照片仍出现 High。
+  能耗模型组件分布中，CPU 约 73～79%；这是模型占比，不能换算成瓦数或每小时掉电量。
+  磁盘：抽样看到约 2.2～9.6 MB/s，读取/写入尚未分别统计。
+  网络：所观察的 Xcode 快照均为 0 KB/s；不能据此排除未采到的短暂下载。
+
+调用栈定位
+  PhotoLibraryService.fetchAlbums：inclusive CPU 时间约 5.66 秒，主要在主线程。
+  PhotoLibraryService.performRefresh：约 5.05 秒，与上述相簿工作有嵌套，不能相加。
+  PhotoLibraryService.assets(in:)：约 1.71 秒；智能相簿查询约 1.36 秒。
+  PhotoSuggestionAnalyzer.analyze：同步调用栈约 0.444 秒。
+  Vision 的内部并行工作可能出现在其他线程，不能用这一个函数的时间代表全部分析成本。
+  本次主线程优先热点是图库/相簿枚举和界面更新，不能仅归因于 AI 扫描。
+
+优先建议
+  1. 将整库与相簿枚举移出主线程，缓存智能相簿成员，合并短时间内的多次 PhotoKit 刷新。
+  2. 前台也对 Serious 温度进行降速或暂停自动扫描；当前代码只在后台对 Serious 暂停。
+     建议暂停非交互分析，保留用户正在进行的审核操作。
+  3. 分组时的 Vision 解档和距离缓存当前按轮重建；大图库可评估有容量限制的跨轮缓存。
+  4. 预览缓存的声明成本上限合计 192 MiB，另外还有分析、播放器和渲染内存。
+     用 Allocations 检查峰值组成，再决定缩减缓存；NSCache 的限额不等于实际驻留或硬上限。
+
+本次视频问题的源码修复
+  视频 PhotoKit 获取改为并发执行，通过 identifier 在工作线程重新取 PHAsset。
+  使用 PhotoKit 原生 requestPlayerItem，减少自行创建 AVPlayerItem 的准备工作。
+  本地自动播放等待 5 秒后取消请求并恢复手动播放入口；用户主动的云端播放由用户决定是否等待。
+  点击审核决定开始切换卡片时，立即取消视频请求和播放，加载提示不拦截手势。
+  加载提示说明可直接保留或稍后处理；审核动作不依赖加载完成。
+  新增 3 项取消/超时竞态测试，验证请求 ID 迟到、回调迟到和提前取消。
+  测试使用源码中的同一请求桥接类，在 macOS 独立测试环境通过。
+  iOS Simulator Debug 完整构建（arm64、x86_64）：BUILD SUCCEEDED。
+  iOS Simulator 测试目标编译：TEST BUILD SUCCEEDED。
+  尚未在真机复现原视频并验证改后响应；不把源码改动当作设备性能改善证据。
+
+验证边界
+  数据来自 Debug、设备有线连接 Xcode，包含采样开销，并且已处于 Serious 温度。
+  本次没有测量启动速度、FPS、完整扫描总时长、绝对功耗和电池消耗率。
+  正式对比需要同一图库与操作脚本的 Release 版本，并控制温度、充电和亮度条件。
+  Power Profiler 组合模板未成功使用；通过 Time Profiler、温度事件和 Xcode 能耗模型得到上述结论。
+
+原始数据（本机）
+  /tmp/swipick-performance-20261009/kinga-cpu-memory.trace
+  /tmp/swipick-performance-20261009/state.xml
+  /tmp/swipick-performance-20261009/cpu-symbolized.xml
+  /tmp/swipick-performance-20261009/build.log
+  /tmp/swipick-performance-20261009/build-for-testing.log
+  /tmp/swipick-performance-20261009/request-tests.log
+
+Apple 方法参考
+  https://developer.apple.com/documentation/xcode/measuring-your-app-s-power-use-with-power-profiler
+  https://developer.apple.com/videos/play/wwdc2026/268/

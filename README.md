@@ -31,7 +31,7 @@ Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，
 - **从产品流程到原生实现**：围绕“筛选 → 判断 → 确认”组织界面，支持手势审核、可撤销决定和跨次继续。
 - **本机 AI 与保留推荐**：结合 Vision 图像特征、OCR 和美学评分生成清理建议，用 SHA-256 核对重复原件；相似组优先评分，展示保留推荐及依据，由用户决定最终操作。
 - **图库操作可靠性**：将本地审核记录与 PhotoKit 写入分离，为 Live Photo 转换保存恢复记录，并在删除原件前核对副本。
-- **缓存、后台处理与功耗控制**：分析结果持久化并接续处理；按充电、低电量模式和温度调整后台工作量与节奏，建议扫描仅读取本机资源。提供中英文资源与行为测试。
+- **缓存、后台处理与功耗控制**：SQLite 按照片增量保存分析结果并接续处理；按充电、低电量模式和温度调整后台工作量与节奏，建议扫描仅读取本机资源。提供中英文资源与行为测试。
 
 ## 从选择到确认
 
@@ -58,13 +58,17 @@ Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，
 
 - **界面与媒体服务分层**：`UI` 负责展示与交互，`Library` 封装 PhotoKit 和媒体操作，`Core` 管理审核记录与本地状态。
 - **决定与图库写入分离**：SwiftData 保存审核决定和待办，用户确认后才提交对应的系统操作。
-- **预览按需加载**：提前准备后续本地清晰预览；云端照片先尝试本地缩略图，必要时请求当前照片的低清小图。开启自动下载后再升级当前照片为高清，不预下载后续云端原片。Live Photo 动态内容在长按时加载，视频与文件大小获取独立处理。
+- **预览按需加载**：为临近卡片分别准备快速与清晰预览，仅提前准备一个附近的本地视频；相簿成员变化时复用未改变像素的预览缓存，避免重复解码。云端照片先尝试本地缩略图，必要时请求当前照片的低清小图。开启自动下载后再升级当前照片为高清，不预下载后续云端原片。Live Photo 动态内容在长按时加载，视频与文件大小获取独立处理。
 - **转换与中断恢复**：Live Photo 转换记录持久化，核对副本后才进入原件删除流程；转换中断后尝试恢复。
 - **文件大小缓存**：按照片修改时间缓存已读取的大小，自动读取本地资源时不主动下载 iCloud 原片。
 - **本机推荐分析**：Vision 图像特征与截图 OCR 筛选照片组，SHA-256 完整资源哈希确认重复；相似组支持多张比较，资源不同的相近版本可同时保留。进入组时优先调用 `VNCalculateImageAestheticsScoresRequest`，不等待整库分析完成。已有收藏或保留决定优先受到保护；评分齐全且有优势时给出推荐，分数接近时参考分辨率，无可靠依据时不强行推荐。
 - **临时截图识别**：截图需要同时有超过 90 天的拍摄时间和临时内容证据，按订单结果、取件码、验证码、已送达物流、过期活动与优惠券分类，沿用逐张审核。
-- **缓存与后台处理**：分析结果、跳过记录和继续审核进度保存在本机，批次完成后缓存续接。分别提交充电与未充电后台任务；充电时放宽单轮数量限制，未充电时采用小批量和较慢节奏。后台低电量模式下未充电时暂停，温度较高时延后处理；系统仍决定执行窗口，充电不保证整晚持续扫描。建议分析不主动下载 iCloud 原片。
+- **缓存与后台处理**：分析结果使用 SQLite 按照片增量写入，旧 JSON 缓存经事务导入与读取核验后迁移；跳过记录和继续审核进度仍保存在本机。复用未变化的分组结果，并在用户操作时暂缓非交互分析。分别提交充电与未充电后台任务；充电时放宽单轮数量限制，未充电时采用小批量和较慢节奏。后台低电量模式下未充电时暂停，温度较高时延后处理；系统仍决定执行窗口，充电不保证整晚持续扫描。建议分析不主动下载 iCloud 原片。
 - **行为测试**：使用 Swift Testing 覆盖审核持久化、撤销、收藏与删除互斥、相簿待办、继续审核状态、设置和滑动判定等逻辑。
+
+## 性能验证
+
+本次优化针对图库与相簿枚举、重复解码和分析缓存写入。已有一次 Debug 真机采样记录，见[性能观察报告](docs/performance/kinga-2026-10-09-report.txt)；它描述优化前的热点与验证边界，不作为优化后能耗或响应速度提升的证据。
 
 ## 本地运行
 
@@ -115,6 +119,6 @@ Tools/             图标生成工具
 
 **Swipick** is a personal native iOS project for reviewing photos and videos one at a time. Swipe left to queue deletion, swipe right to keep, or defer a decision for later. Review choices stay on the device; queued deletions, favorites and album assignments are confirmed before being written to the system photo library.
 
-Built with **SwiftUI, PhotoKit, SwiftData, Vision and CryptoKit**, the app includes month, year and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. On-device suggestions combine Vision feature extraction, OCR, aesthetic scoring and SHA-256 hashing to group similar photos, recommend images to keep, and identify duplicate originals and outdated temporary screenshots. Opened groups receive priority scoring, and recommendations remain advisory. Cached analysis resumes across sessions; background work adjusts its batch size and pace according to charging, Low Power Mode and thermal conditions. iOS controls background execution windows, and suggestion scans do not download iCloud originals. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included.
+Built with **SwiftUI, PhotoKit, SwiftData, Vision and CryptoKit**, the app includes month, year and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. On-device suggestions combine Vision feature extraction, OCR, aesthetic scoring and SHA-256 hashing to group similar photos, recommend images to keep, and identify duplicate originals and outdated temporary screenshots. Opened groups receive priority scoring, and recommendations remain advisory. A per-asset SQLite cache supports incremental analysis writes and migration from the previous JSON cache. Unchanged group results and media previews are reused, and non-interactive analysis yields during review actions. Cached analysis resumes across sessions; background work adjusts its batch size and pace according to charging, Low Power Mode and thermal conditions. iOS controls background execution windows, and suggestion scans do not download iCloud originals. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included.
 
 To run it, open `Zeying.xcodeproj` in an Xcode version supporting the iOS 26 SDK, select the `Zeying` scheme, and choose a simulator or your iPhone. Device installation requires configuring your development team and bundle identifier. The minimum deployment target is **iOS 26.0**. Run the included Swift Testing tests through **Product → Test** in Xcode.

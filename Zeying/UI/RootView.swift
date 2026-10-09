@@ -81,11 +81,14 @@ struct RootView: View {
                 if suggestions.isScanning { PhotoSuggestionForegroundGrace.begin(service: suggestions) }
             } else if phase == .background {
                 _ = reviews.flushPendingReviewChanges()
+                suggestions.pause()
+                PhotoSuggestionForegroundGrace.end()
                 suggestions.scheduleBackgroundCheck(after: suggestions.hasScanned
                     ? PhotoSuggestionBackgroundTask.successfulScanDelay : 0)
             } else if phase == .active {
                 PhotoSuggestionForegroundGrace.end()
                 PhotoSuggestionBackgroundTask.cancelRunning()
+                suggestions.deferAnalysisForInteraction()
                 if PHPhotoLibrary.authorizationStatus(for: .readWrite) != library.authorizationStatus {
                     Task { await library.refresh() }
                 } else if library.hasLoaded {
@@ -104,6 +107,7 @@ struct RootView: View {
             }
         }
         .onChange(of: selectedTab) { previous, current in
+            suggestions.deferAnalysisForInteraction()
             if previous == .suggestions && current != .suggestions {
                 suggestionsOpenedFromHome = false
             }
@@ -129,7 +133,13 @@ struct RootView: View {
     }
 
     private var tabView: some View {
-        TabView(selection: $selectedTab) {
+        TabView(selection: Binding(
+            get: { selectedTab },
+            set: { tab in
+                if tab != selectedTab { suggestions.deferAnalysisForInteraction() }
+                selectedTab = tab
+            }
+        )) {
             NavigationStack(path: $homePath) {
                 LibraryHomeView(
                     library: library,

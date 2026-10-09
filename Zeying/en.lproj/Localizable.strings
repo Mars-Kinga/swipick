@@ -289,6 +289,8 @@
 "部分照片未能加入相簿。" = "Some photos could not be added to albums.";
 "重新尝试转换" = "Retry Conversion";
 "随机审查本组照片与视频" = "Shuffle This Group";
+"恢复本组原有顺序" = "Restore Original Order";
+"当前照片也会切换，仍可撤销上一步" = "The current photo changes too. You can still undo the last action.";
 "随机排列所有未处理照片，不按时间顺序" = "Shuffle all unreviewed photos instead of following date order";
 "随机清理" = "Shuffle Review";
 "需要先获得照片图库权限。" = "Photos library access is required.";
@@ -844,4 +846,6 @@
 "仅存于 iCloud 的照片会先显示设备可取得的预览，可能较模糊；看不清时先别删除。" = "Cloud-only photos show any preview available on your device. It may be blurry; if you cannot tell what is shown, do not delete it yet.";
 "iCloud 照片预览" = "iCloud Photo Previews";
 "关于建议" = "About Suggestions";
+"清理建议在设备上生成，分析过程无需将照片发送到外部服务。" = "Suggestions are generated on your device. Photo analysis does not send images to an external service.";
 "相似画面、超过 90 天的临时截图，以及原始文件完全相同的副本。" = "Similar scenes, temporary screenshots over 90 days old, and files with identical originals.";
+"无需等待加载，可直接保留或稍后处理" = "You can keep or defer this item while it loads";

@@ -7,6 +7,23 @@ enum ReviewQueueSortMode: String, Codable {
     case shuffled
 }
 
+enum ReviewQueueOrdering {
+    static func shuffled(_ remaining: [String]) -> [String] {
+        guard remaining.count > 1 else { return remaining }
+        var result = remaining.shuffled()
+        if result.first == remaining.first { result.swapAt(0, 1) }
+        return result
+    }
+
+    static func restored(_ remaining: [String], originalOrder: [String]) -> [String] {
+        let remainingIDs = Set(remaining)
+        let restored = originalOrder.filter { remainingIDs.contains($0) }
+        guard restored.count != remaining.count else { return restored }
+        let restoredIDs = Set(restored)
+        return restored + remaining.filter { !restoredIDs.contains($0) }
+    }
+}
+
 struct ReviewQueueResume {
     let assetIDs: [String]
     let position: Int
