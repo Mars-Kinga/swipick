@@ -78,9 +78,6 @@ struct SuggestedReviewSessionView: View {
                                 .disabled(!canUndo)
                         }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(String(localized: "跳过本组"), systemImage: "forward.end") { skip() }
-                    }
                 }
             } else {
                 comparisonContent
@@ -179,7 +176,7 @@ struct SuggestedReviewSessionView: View {
                         Button {
                             _ = commit(keeping: [], allowEmptyKeep: true)
                         } label: {
-                            Label(String(localized: "一张也不想要"), systemImage: "trash")
+                            Label(String(localized: "全部删除"), systemImage: "trash")
                                 .font(.subheadline.weight(.semibold))
                                 .frame(maxWidth: .infinity, minHeight: 32)
                         }
@@ -635,7 +632,7 @@ private struct SuggestionPhotoGallery: View {
                 }
                 HStack(spacing: 8) {
                     groupAction(String(localized: "全部保留"), choice: .all, enabled: canKeepAll)
-                    groupAction(String(localized: "一张也不想要"), choice: .none,
+                    groupAction(String(localized: "全部删除"), choice: .none,
                                 enabled: canKeepNone && keeping.intersection(Set(assetIDs)).isEmpty)
                 }
             }

@@ -142,7 +142,7 @@ struct SuggestionsView: View {
                 NavigationLink {
                     session(filteredGroups, startingAt: resumedGroups.first)
                 } label: {
-                    Label(String(localized: resumedGroups.isEmpty ? "开始推荐审核" : "继续推荐审核"), systemImage: "play.fill")
+                    Label(String(localized: resumedGroups.isEmpty ? "开始整理" : "继续整理"), systemImage: "play.fill")
                         .font(.headline)
                         .foregroundStyle(Color(uiColor: .systemBackground))
                         .frame(maxWidth: .infinity)

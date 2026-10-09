@@ -1,6 +1,6 @@
 import Foundation
 
-enum MediaCategory: String, CaseIterable, Identifiable, Codable {
+enum MediaCategory: String, CaseIterable, Identifiable, Codable, Sendable {
     case photo
     case video
     case screenshot
@@ -33,7 +33,7 @@ enum MediaCategory: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-enum LibraryScope: Hashable, Codable {
+enum LibraryScope: Hashable, Codable, Sendable {
     case all
     case random
     case month(Date)
@@ -43,7 +43,7 @@ enum LibraryScope: Hashable, Codable {
     case later
 }
 
-struct LibraryAlbum: Identifiable {
+struct LibraryAlbum: Identifiable, Equatable, Sendable {
     let id: String
     let title: String
     let count: Int

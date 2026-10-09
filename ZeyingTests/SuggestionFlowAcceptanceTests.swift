@@ -5,7 +5,7 @@ import Testing
 
 @MainActor
 struct SuggestionFlowAcceptanceTests {
-    @Test("一张也不想要只将本组加入待删，保留已保护照片并可整组撤销")
+    @Test("全部删除只将本组加入待删，保留已保护照片并可整组撤销")
     func stageEntireGroupForDeletionAndUndo() throws {
         let container = try ModelContainer(for: ReviewRecord.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         let store = ReviewStore(context: container.mainContext)

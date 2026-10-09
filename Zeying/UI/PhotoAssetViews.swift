@@ -228,7 +228,10 @@ struct AssetPreviewView: View {
 
     @Environment(AppSettings.self) private var settings
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var player: AVPlayer?
+    @State private var hasVideoFrame = false
+    @State private var showsVideoLoadingIndicator = false
     @State private var livePhoto: PHLivePhoto?
     @State private var livePhotoAssetIdentifier: String?
     @State private var livePhotoRequestTask: Task<Void, Never>?
@@ -239,8 +242,39 @@ struct AssetPreviewView: View {
     var body: some View {
         Group {
             if asset.mediaType == .video {
-                if let player {
-                    VideoPlayer(player: player)
+                ZStack {
+                    if !hasVideoFrame {
+                        AssetImageView(
+                            asset: asset,
+                            library: library,
+                            allowNetwork: false,
+                            targetSize: CGSize(width: 1_500, height: 1_500),
+                            initialPreview: initialPreview,
+                            requiresFullQuality: requiresFullQuality
+                        )
+                        .accessibilityLabel(String(localized: "视频预览"))
+                        .transition(.opacity)
+                    }
+                    if let player {
+                        ReadyVideoPlayerView(player: player) {
+                            guard isActive, activePlayerIdentifier == asset.localIdentifier,
+                                  self.player === player else { return }
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                                hasVideoFrame = true
+                                videoPlaybackState = .idle
+                                showsVideoLoadingIndicator = false
+                            }
+                        } onFailure: {
+                            guard activePlayerIdentifier == asset.localIdentifier,
+                                  self.player === player else { return }
+                            player.pause()
+                            PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
+                            self.player = nil
+                            hasVideoFrame = false
+                            videoPlaybackState = .failed
+                        }
+                        .opacity(hasVideoFrame ? 1 : 0)
+                        .allowsHitTesting(hasVideoFrame)
                         .onReceive(player.publisher(for: \.timeControlStatus).receive(on: DispatchQueue.main)) { _ in
                             guard videoSoundEnabled, scenePhase == .active else { return }
                             if player.timeControlStatus == .paused {
@@ -252,28 +286,21 @@ struct AssetPreviewView: View {
                             }
                         }
                         .overlay(alignment: .topTrailing) {
-                            ZeyingIconButton(
-                                systemName: videoSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                                accessibilityLabel: videoSoundEnabled ? String(localized: "静音本次审核的视频") : String(localized: "打开本次审核的视频声音"),
-                                tint: .white
-                            ) {
-                                toggleVideoSound(player)
+                            if hasVideoFrame {
+                                ZeyingIconButton(
+                                    systemName: videoSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                                    accessibilityLabel: videoSoundEnabled ? String(localized: "静音本次审核的视频") : String(localized: "打开本次审核的视频声音"),
+                                    tint: .white
+                                ) {
+                                    toggleVideoSound(player)
+                                }
+                                .accessibilityHint(String(localized: "声音设置会用于后续视频，退出审核页后恢复默认静音；用设备音量按钮调整音量"))
+                                .padding(16)
                             }
-                            .accessibilityHint(String(localized: "声音设置会用于后续视频，退出审核页后恢复默认静音；用设备音量按钮调整音量"))
-                            .padding(16)
                         }
                         .onDisappear { player.pause() }
-                } else {
-                    ZStack {
-                        AssetImageView(
-                            asset: asset,
-                            library: library,
-                            allowNetwork: false,
-                            targetSize: CGSize(width: 1_500, height: 1_500),
-                            initialPreview: initialPreview,
-                            requiresFullQuality: requiresFullQuality
-                        )
-                        .accessibilityLabel(String(localized: "视频预览"))
+                    }
+                    if !hasVideoFrame {
                         videoPlaybackOverlay
                     }
                 }
@@ -346,6 +373,8 @@ struct AssetPreviewView: View {
                 PreviewAudioSession.stopAudiblePreview(for: activePlayerIdentifier)
             }
             player = nil
+            hasVideoFrame = false
+            showsVideoLoadingIndicator = false
             activePlayerIdentifier = requestIdentifier
             livePhotoRequestTask?.cancel()
             livePhotoRequestTask = nil
@@ -359,8 +388,26 @@ struct AssetPreviewView: View {
                 startVideoPlayback(allowNetwork: false)
             }
         }
+        .task(id: videoPlaybackState == .loading) {
+            guard videoPlaybackState == .loading else {
+                showsVideoLoadingIndicator = false
+                return
+            }
+            // Fast local starts need no flashing progress overlay. This
+            // delays only the cue; decoding and playback start immediately.
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, isActive, videoPlaybackState == .loading else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
+                showsVideoLoadingIndicator = true
+            }
+        }
         .onChange(of: isActive) { _, active in
-            if !active, asset.mediaType == .video { cancelVideoPlayback() }
+            guard asset.mediaType == .video else { return }
+            if !active {
+                cancelVideoPlayback()
+            } else if autoplayVideo {
+                startVideoPlayback(allowNetwork: false)
+            }
         }
         .onChange(of: isLivePhotoPressed) { _, isPressed in
             if isPressed {
@@ -384,6 +431,8 @@ struct AssetPreviewView: View {
                         PreviewAudioSession.prepareMutedPreview()
                     }
                     player.play()
+                } else if autoplayVideo {
+                    startVideoPlayback(allowNetwork: false)
                 }
             } else {
                 player?.pause()
@@ -394,6 +443,8 @@ struct AssetPreviewView: View {
             player?.pause()
             PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
             player = nil
+            hasVideoFrame = false
+            showsVideoLoadingIndicator = false
             videoPlaybackTask?.cancel()
             videoPlaybackTask = nil
             videoPlaybackState = .idle
@@ -423,33 +474,27 @@ struct AssetPreviewView: View {
     private var videoPlaybackOverlay: some View {
         switch videoPlaybackState {
         case .idle:
-            if autoplayVideo {
-                ProgressView()
-                    .tint(.white)
-            } else {
+            if !autoplayVideo {
                 videoPlaybackButton {
                     startVideoPlayback(allowNetwork: true)
                 }
             }
         case .manual:
-            videoPlaybackButton {
-                startVideoPlayback(allowNetwork: true)
+            if !autoplayVideo {
+                videoPlaybackButton {
+                    startVideoPlayback(allowNetwork: true)
+                }
             }
         case .loading:
-            VStack(spacing: 8) {
-                ProgressView()
-                    .tint(.white)
-                Text(String(localized: "正在加载视频…"))
-                    .font(.caption.weight(.medium))
-                Text(String(localized: "无需等待加载，可直接保留或稍后处理"))
-                    .font(.caption2)
-                    .multilineTextAlignment(.center)
+            if showsVideoLoadingIndicator {
+                LoadingDots(reduceMotion: reduceMotion, color: .white)
+                .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+                .allowsHitTesting(false)
+                .accessibilityLabel(String(localized: "正在加载视频…"))
+                .accessibilityHint(String(localized: "无需等待加载，可直接保留或稍后处理"))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .foregroundStyle(.white)
-            .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .allowsHitTesting(false)
         case .failed:
             VStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle")
@@ -490,6 +535,7 @@ struct AssetPreviewView: View {
               videoPlaybackTask == nil else { return }
 
         let requestIdentifier = asset.localIdentifier
+        activePlayerIdentifier = requestIdentifier
         videoPlaybackState = .loading
         PreviewAudioSession.prepareMutedPreview()
         videoPlaybackTask = Task { @MainActor in
@@ -514,7 +560,7 @@ struct AssetPreviewView: View {
                 previewPlayer.isMuted = true
             }
             player = previewPlayer
-            videoPlaybackState = .idle
+            hasVideoFrame = false
             videoPlaybackTask = nil
             if scenePhase == .active {
                 previewPlayer.play()
@@ -528,6 +574,8 @@ struct AssetPreviewView: View {
         videoPlaybackTask = nil
         player?.pause()
         player = nil
+        hasVideoFrame = false
+        showsVideoLoadingIndicator = false
         PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
         videoPlaybackState = .manual
     }
@@ -546,6 +594,77 @@ struct AssetPreviewView: View {
             livePhotoAssetIdentifier = requestedLivePhoto == nil ? nil : requestIdentifier
             livePhotoLoadFailed = requestedLivePhoto == nil
             livePhotoRequestTask = nil
+        }
+    }
+}
+
+/// Observe the rendered first frame rather than merely receiving a player
+/// item. The poster stays visible while AVKit prepares its display surface.
+private struct ReadyVideoPlayerView: UIViewControllerRepresentable {
+    let player: AVPlayer
+    let onReady: @MainActor () -> Void
+    let onFailure: @MainActor () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.videoGravity = .resizeAspect
+        controller.view.backgroundColor = .clear
+        updateUIViewController(controller, context: context)
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        context.coordinator.onReady = onReady
+        context.coordinator.onFailure = onFailure
+        guard controller.player !== player else { return }
+        controller.player = player
+        context.coordinator.observe(controller, player: player)
+    }
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
+        coordinator.invalidate()
+        controller.player = nil
+    }
+
+    @MainActor
+    final class Coordinator {
+        var onReady: (@MainActor () -> Void)?
+        var onFailure: (@MainActor () -> Void)?
+        private var readyObservation: NSKeyValueObservation?
+        private var failureObservation: NSKeyValueObservation?
+        private var generation = UUID()
+        private var didReportReady = false
+
+        func observe(_ controller: AVPlayerViewController, player: AVPlayer) {
+            invalidate()
+            let activeGeneration = generation
+            readyObservation = controller.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self, weak controller] _, _ in
+                Task { @MainActor in
+                    guard let self, let controller, self.generation == activeGeneration,
+                          controller.player === player, controller.isReadyForDisplay,
+                          !self.didReportReady else { return }
+                    self.didReportReady = true
+                    self.onReady?()
+                }
+            }
+            failureObservation = player.currentItem?.observe(\.status, options: [.initial, .new]) { [weak self, weak controller] item, _ in
+                Task { @MainActor in
+                    guard let self, let controller, self.generation == activeGeneration,
+                          controller.player === player, item.status == .failed else { return }
+                    self.onFailure?()
+                }
+            }
+        }
+
+        func invalidate() {
+            generation = UUID()
+            readyObservation?.invalidate()
+            failureObservation?.invalidate()
+            readyObservation = nil
+            failureObservation = nil
+            didReportReady = false
         }
     }
 }

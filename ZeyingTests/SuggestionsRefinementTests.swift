@@ -354,7 +354,7 @@ struct SuggestionsRefinementTests {
         #expect(SuggestionReviewQueue.initialIndex(of: nil, in: groups) == 0)
     }
 
-    @Test("低电量或严重温度状态暂停后台检查")
+    @Test("严重温度暂停前后台检查，充电不覆盖热限制")
     func backgroundCheckBudgetPausesForPowerAndThermalState() {
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .nominal))
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .fair))
@@ -362,7 +362,8 @@ struct SuggestionsRefinementTests {
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .nominal, isCharging: true))
         #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .nominal, background: false))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .serious))
-        #expect(!SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .serious, background: false))
+        #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: true, thermalState: .serious, background: false))
+        #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .serious, background: false, isCharging: true))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .critical))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .critical, background: false))
         #expect(SuggestionCheckBudget.shouldPause(lowPowerMode: false, thermalState: .critical, isCharging: true))

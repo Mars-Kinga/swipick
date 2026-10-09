@@ -210,7 +210,7 @@
 			<string>Confirm Album Changes for %lld Items</string>
 		</dict>
 	</dict>
-	<key>还有 %lld 项待完成操作，可到清单继续确认。</key>
+	<key>还有 %lld 项待确认操作，可到清单确认。</key>
 	<dict>
 		<key>NSStringLocalizedFormatKey</key>
 		<string>%#@count@</string>

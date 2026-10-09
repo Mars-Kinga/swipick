@@ -30,6 +30,8 @@ final class PhotoSuggestionService {
     @ObservationIgnored private let snapshotWriter: SuggestionGroupSnapshotWriter
     @ObservationIgnored private var snapshotRevision = 0
     @ObservationIgnored private var scanTask: Task<Void, Never>?
+    @ObservationIgnored private var energyResumeTask: Task<Void, Never>?
+    @ObservationIgnored private var foregroundActive = true
     @ObservationIgnored private var priorityAttemptedGroupIDs = Set<String>()
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var libraryRevision: Int?
@@ -149,20 +151,48 @@ final class PhotoSuggestionService {
     }
 
     func startIfNeeded(library: PhotoLibraryService, reviews: ReviewStore) {
+        guard foregroundActive, !isManuallyPaused else { return }
+        if SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+                                             thermalState: ProcessInfo.processInfo.thermalState,
+                                             background: false, isCharging: isCharging) {
+            if isScanning { pause() }
+            energyResumeTask?.cancel()
+            energyResumeTask = nil
+            isEnergyPaused = true
+            scheduleBackgroundCheck()
+            return
+        }
+        if isEnergyPaused {
+            guard energyResumeTask == nil else { return }
+            energyResumeTask = Task { [weak self] in
+                // Avoid repeatedly restarting work near a thermal boundary.
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled, let self else { return }
+                energyResumeTask = nil
+                guard foregroundActive, !isManuallyPaused,
+                      !SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+                          thermalState: ProcessInfo.processInfo.thermalState,
+                          background: false, isCharging: isCharging) else { return }
+                isEnergyPaused = false
+                startIfNeeded(library: library, reviews: reviews)
+            }
+            return
+        }
         let needsDailyRefresh = lastScanDate.map { !Calendar.current.isDateInToday($0) } ?? true
         guard library.hasLoaded, SuggestionScanStartPolicy.shouldStart(
             manuallyPaused: isManuallyPaused, isScanning: isScanning,
             scannedRevision: libraryRevision, currentRevision: library.suggestionRevision,
             hasScanned: hasScanned, needsDailyRefresh: needsDailyRefresh
         ) else { return }
-        if SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
-                                             thermalState: ProcessInfo.processInfo.thermalState,
-                                             background: false, isCharging: isCharging) {
-            isEnergyPaused = true
-            scheduleBackgroundCheck()
-            return
-        }
         start(library: library, reviews: reviews)
+    }
+
+    func setForegroundActive(_ active: Bool) {
+        foregroundActive = active
+        if !active {
+            energyResumeTask?.cancel()
+            energyResumeTask = nil
+        }
     }
 
     /// Give navigation and review-card handoffs priority over optional image
@@ -234,23 +264,17 @@ final class PhotoSuggestionService {
             guard !Task.isCancelled, generation == currentGeneration else { return }
             var descriptors: [SuggestionAsset] = []
             descriptors.reserveCapacity(library.assets.count)
-            // Reading thousands of PHAsset properties in one main-actor pass
-            // can freeze the first frame after returning to the app.
-            for (index, asset) in library.assets.enumerated() {
+            // The library worker already read the PhotoKit metadata. Only
+            // local review/album protection is merged on the main actor.
+            for (index, candidate) in library.suggestionAssets.enumerated() {
                 guard !Task.isCancelled, generation == currentGeneration else { return }
-                if asset.mediaType == .image {
-                    let decision = reviews.decision(for: asset.localIdentifier)
-                    let protected = asset.isFavorite || reviews.isPendingFavorite(asset.localIdentifier) || decision == .keep ||
-                        albumAssignments?.assignment(for: asset.localIdentifier) != nil
-                    let descriptor = SuggestionAsset(
-                        id: asset.localIdentifier, modifiedAt: asset.modificationDate, createdAt: asset.creationDate,
-                        width: asset.pixelWidth, height: asset.pixelHeight,
-                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
-                        isLivePhoto: asset.mediaSubtypes.contains(.photoLive), burstID: asset.burstIdentifier,
-                        isProtected: protected, isEligible: decision == nil && !protected
-                    )
-                    if descriptor.isEligible || descriptor.isProtected { descriptors.append(descriptor) }
-                }
+                var descriptor = candidate
+                let decision = reviews.decision(for: candidate.id)
+                let protected = candidate.isProtected || reviews.isPendingFavorite(candidate.id) || decision == .keep ||
+                    albumAssignments?.assignment(for: candidate.id) != nil
+                descriptor.isProtected = protected
+                descriptor.isEligible = decision == nil && !protected
+                if descriptor.isEligible || descriptor.isProtected { descriptors.append(descriptor) }
                 if index.isMultiple(of: 32) { await Task.yield() }
             }
             guard !Task.isCancelled, generation == currentGeneration else { return }
@@ -265,6 +289,8 @@ final class PhotoSuggestionService {
     }
 
     func pause(manually: Bool = false) {
+        energyResumeTask?.cancel()
+        energyResumeTask = nil
         if manually {
             isManuallyPaused = true
             isEnergyPaused = false
@@ -550,6 +576,18 @@ private actor PhotoSuggestionAnalyzer {
     private var groupingRevision = 0
     private var cachedGroupingRevision: Int?
     private var cachedGroups: [CleanupSuggestion]?
+    private struct CachedFeature {
+        let data: Data
+        let observation: VNFeaturePrintObservation
+        let revision: Int
+    }
+    private struct FeaturePair: Hashable {
+        let lower: Int
+        let upper: Int
+    }
+    private var featureCache = BoundedCache<String, CachedFeature>(capacity: 128)
+    private var distanceCache = BoundedCache<FeaturePair, Float>(capacity: 4096)
+    private var featureRevision = 0
     private var dirtyAnalysisIDs = Set<String>()
     private var removedAnalysisIDs = Set<String>()
     private var analysisStore: SuggestionAnalysisStore?
@@ -654,6 +692,8 @@ private actor PhotoSuggestionAnalyzer {
         let lightweightProgressStride = max(4, assets.count / 100)
         if !background { await interactionGate.waitIfNeeded() }
         guard !Task.isCancelled else { return }
+        if await stopForEnergyIfNeeded(background: background, isCharging: isCharging,
+            checked: checked, unavailable: unavailable, progress: progress) { return }
         await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable))
         var lastGroupRefresh = clock.now
         for asset in ordered {
@@ -668,7 +708,7 @@ private actor PhotoSuggestionAnalyzer {
                                                                     background: background, isCharging: isCharging)
                 if energyPaused || (background && newAnalyses >= SuggestionScanPace.analysisLimit(isCharging: isCharging)) {
                     saveCache(force: true)
-                    await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable,
+                    await progress(SuggestionScanUpdate(groups: cachedGroups ?? [], checked: checked, unavailable: unavailable,
                                                         paused: true, energyPaused: energyPaused))
                     return
                 }
@@ -690,11 +730,7 @@ private actor PhotoSuggestionAnalyzer {
                     removedAnalysisIDs.insert(asset.id)
                 }
                 newAnalyses += 1
-                if background && !isCharging {
-                    try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
-                } else if !background {
-                    try? await Task.sleep(for: SuggestionScanPace.foregroundItemDelay(isCharging: isCharging))
-                }
+                try? await Task.sleep(for: SuggestionScanPace.effectiveDelay(background: background, isCharging: isCharging))
                 checked += 1
                 // A full-library regroup is much more expensive than one
                 // image analysis. Batch discoveries so progress stays visible
@@ -721,6 +757,9 @@ private actor PhotoSuggestionAnalyzer {
         // feature-print caches remain usable while scores are filled in, so
         // an upgrade never empties Suggestions just to migrate the cache.
         if !background { await interactionGate.waitIfNeeded() }
+        guard !Task.isCancelled else { saveCache(force: true); return }
+        if await stopForEnergyIfNeeded(background: background, isCharging: isCharging,
+            checked: checked, unavailable: unavailable, progress: progress) { return }
         let comparisonIDs = Set(groups(for: assets).filter { $0.kind == .similar }.flatMap(\.assetIDs))
         var newScores = 0
         for asset in ordered where comparisonIDs.contains(asset.id) && analyses[asset.id]?.aestheticChecked != true {
@@ -732,7 +771,7 @@ private actor PhotoSuggestionAnalyzer {
                                                                 background: background, isCharging: isCharging)
             if energyPaused || (background && newAnalyses + newScores >= SuggestionScanPace.analysisLimit(isCharging: isCharging)) {
                 saveCache(force: true)
-                await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable,
+                await progress(SuggestionScanUpdate(groups: cachedGroups ?? [], checked: checked, unavailable: unavailable,
                                                     paused: true, energyPaused: energyPaused))
                 return
             }
@@ -744,11 +783,7 @@ private actor PhotoSuggestionAnalyzer {
             groupingRevision &+= 1
             dirtyAnalysisIDs.insert(asset.id)
             newScores += 1
-            if background && !isCharging {
-                try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
-            } else if !background {
-                try? await Task.sleep(for: SuggestionScanPace.foregroundItemDelay(isCharging: isCharging))
-            }
+            try? await Task.sleep(for: SuggestionScanPace.effectiveDelay(background: background, isCharging: isCharging))
             if newScores % 24 == 0 {
                 saveCache()
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable))
@@ -762,6 +797,9 @@ private actor PhotoSuggestionAnalyzer {
         // Stream original resources only for visually nominated still copies.
         // Live Photos remain visual suggestions because their movie matters.
         if !background { await interactionGate.waitIfNeeded() }
+        guard !Task.isCancelled else { saveCache(force: true); return }
+        if await stopForEnergyIfNeeded(background: background, isCharging: isCharging,
+            checked: checked, unavailable: unavailable, progress: progress) { return }
         let probable = groups(for: assets).filter { $0.reason == .possibleVersions }
         let nominated = Set(probable.flatMap(\.assetIDs))
         await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable, verifying: !nominated.isEmpty))
@@ -782,7 +820,7 @@ private actor PhotoSuggestionAnalyzer {
                                                                 background: background, isCharging: isCharging)
             if energyPaused || (background && verified >= SuggestionScanPace.resourceLimit(isCharging: isCharging)) {
                 saveCache(force: true)
-                await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable,
+                await progress(SuggestionScanUpdate(groups: cachedGroups ?? [], checked: checked, unavailable: unavailable,
                                                     paused: true, energyPaused: energyPaused))
                 return
             }
@@ -805,40 +843,61 @@ private actor PhotoSuggestionAnalyzer {
                 resourceFailuresDirty = true
             }
             verified += 1
-            if background && !isCharging {
-                try? await Task.sleep(for: SuggestionScanPace.itemDelay(isCharging: false))
-            } else if !background {
-                try? await Task.sleep(for: SuggestionScanPace.foregroundItemDelay(isCharging: isCharging))
-            }
+            try? await Task.sleep(for: SuggestionScanPace.effectiveDelay(background: background, isCharging: isCharging))
             if verified % 24 == 0 {
                 saveCache()
                 await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable, verifying: true))
             }
         }
         guard !Task.isCancelled else { saveCache(force: true); return }
+        if await stopForEnergyIfNeeded(background: background, isCharging: isCharging,
+            checked: checked, unavailable: unavailable, progress: progress) { return }
         saveCache(force: true)
         let analysisError = analysisFailures > 0
             ? String(localized: "部分照片未能完成图像分析。可更新建议重试，或继续按月份审核。") : nil
         await progress(SuggestionScanUpdate(groups: groups(for: assets), checked: checked, unavailable: unavailable, complete: true, error: analysisError ?? cacheError))
     }
 
+    private func stopForEnergyIfNeeded(
+        background: Bool, isCharging: Bool, checked: Int, unavailable: Int,
+        progress: @Sendable (SuggestionScanUpdate) async -> Void
+    ) async -> Bool {
+        guard SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            thermalState: ProcessInfo.processInfo.thermalState, background: background,
+            isCharging: isCharging) else { return false }
+        saveCache(force: true)
+        await progress(SuggestionScanUpdate(groups: cachedGroups ?? [], checked: checked,
+            unavailable: unavailable, paused: true, energyPaused: true))
+        return true
+    }
+
+    private func feature(for identifier: String) -> CachedFeature? {
+        guard let data = analyses[identifier]?.featurePrint, !data.isEmpty else { return nil }
+        if let cached = featureCache.value(for: identifier), cached.data == data { return cached }
+        guard let observation = try? NSKeyedUnarchiver.unarchivedObject(
+            ofClass: VNFeaturePrintObservation.self, from: data) else { return nil }
+        featureRevision &+= 1
+        let cached = CachedFeature(data: data, observation: observation, revision: featureRevision)
+        featureCache.insert(cached, for: identifier)
+        return cached
+    }
+
     private func groups(for assets: [SuggestionAsset]) -> [CleanupSuggestion] {
+        guard !Task.isCancelled else { return cachedGroups ?? [] }
         if cachedGroupingRevision == groupingRevision, let cachedGroups { return cachedGroups }
-        var prints: [String: VNFeaturePrintObservation] = [:]
-        var distances: [String: Float] = [:]
-        let rebuilt = SuggestionGrouping.build(assets: assets, analyses: analyses) { left, right in
-            let key = [left, right].sorted().joined(separator: "\n")
-            if let distance = distances[key] { return distance }
-            for id in [left, right] where prints[id] == nil {
-                guard let data = self.analyses[id]?.featurePrint else { return nil }
-                prints[id] = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: data)
-            }
-            guard let first = prints[left], let second = prints[right] else { return nil }
+        let rebuilt = SuggestionGrouping.build(assets: assets, analyses: analyses,
+            isCancelled: { Task.isCancelled }) { left, right in
+            guard !Task.isCancelled, let first = self.feature(for: left), let second = self.feature(for: right) else { return nil }
+            // Revisions belong to the exact decoded feature data. A changed
+            // photo cannot reuse a distance from its previous feature print.
+            let key = FeaturePair(lower: min(first.revision, second.revision), upper: max(first.revision, second.revision))
+            if let distance = self.distanceCache.value(for: key) { return distance }
             var distance: Float = 1
-            guard (try? first.computeDistance(&distance, to: second)) != nil else { return nil }
-            distances[key] = distance
+            guard (try? first.observation.computeDistance(&distance, to: second.observation)) != nil else { return nil }
+            self.distanceCache.insert(distance, for: key)
             return distance
         }
+        guard !Task.isCancelled else { return cachedGroups ?? [] }
         cachedGroups = rebuilt
         cachedGroupingRevision = groupingRevision
         return rebuilt

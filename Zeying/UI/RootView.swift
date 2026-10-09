@@ -77,15 +77,18 @@ struct RootView: View {
             selectedTab = .home
         })
         .onChange(of: scenePhase) { _, phase in
+            suggestions.setForegroundActive(phase == .active)
             if phase == .inactive {
                 if suggestions.isScanning { PhotoSuggestionForegroundGrace.begin(service: suggestions) }
             } else if phase == .background {
+                library.stopReviewPrefetching()
                 _ = reviews.flushPendingReviewChanges()
                 suggestions.pause()
                 PhotoSuggestionForegroundGrace.end()
                 suggestions.scheduleBackgroundCheck(after: suggestions.hasScanned
                     ? PhotoSuggestionBackgroundTask.successfulScanDelay : 0)
             } else if phase == .active {
+                library.updatePerformanceBudget()
                 PhotoSuggestionForegroundGrace.end()
                 PhotoSuggestionBackgroundTask.cancelRunning()
                 suggestions.deferAnalysisForInteraction()
@@ -113,6 +116,7 @@ struct RootView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in
+            library.updatePerformanceBudget()
             if scenePhase == .active && library.hasLoaded {
                 suggestions.startIfNeeded(library: library, reviews: reviews)
             }
@@ -125,9 +129,16 @@ struct RootView: View {
             suggestions.scheduleBackgroundCheck(after: 0)
         }
         .onReceive(NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)) { _ in
+            library.updatePerformanceBudget()
             if scenePhase == .active && library.hasLoaded {
                 suggestions.startIfNeeded(library: library, reviews: reviews)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            library.updatePerformanceBudget(memoryWarning: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+            Task { await library.refresh() }
         }
         .tint(.primary)
     }

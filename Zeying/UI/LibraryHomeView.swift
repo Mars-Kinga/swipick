@@ -77,20 +77,7 @@ struct LibraryHomeView: View {
         }.count
     }
 
-    private var monthBuckets: [MonthBucket] {
-        let calendar = Calendar.current
-        var grouped: [Date: [PHAsset]] = [:]
-        for asset in library.assets {
-            guard let date = asset.creationDate,
-                  let month = calendar.date(from: calendar.dateComponents([.year, .month], from: date)) else {
-                continue
-            }
-            grouped[month, default: []].append(asset)
-        }
-        return grouped
-            .map { MonthBucket(date: $0.key, assets: $0.value) }
-            .sorted { $0.date > $1.date }
-    }
+    private var monthBuckets: [MonthBucket] { library.monthBuckets }
 
     private var visibleMonthBuckets: [MonthBucket] {
         guard showingAllMonths || monthBuckets.count <= 6 else {
@@ -99,17 +86,7 @@ struct LibraryHomeView: View {
         return monthBuckets
     }
 
-    private var yearBuckets: [MonthBucket] {
-        let calendar = Calendar.current
-        var grouped: [Date: [PHAsset]] = [:]
-        for asset in library.assets {
-            guard let date = asset.creationDate,
-                  let year = calendar.date(from: calendar.dateComponents([.year], from: date)) else { continue }
-            grouped[year, default: []].append(asset)
-        }
-        return grouped.map { MonthBucket(date: $0.key, assets: $0.value) }
-            .sorted { $0.date > $1.date }
-    }
+    private var yearBuckets: [MonthBucket] { library.yearBuckets }
 
     private var visibleYearBuckets: [MonthBucket] {
         showingAllYears ? yearBuckets : Array(yearBuckets.prefix(6))
@@ -834,11 +811,7 @@ private enum TimeGrouping: Hashable {
     case year
 }
 
-private struct MonthBucket: Identifiable {
-    let date: Date
-    let assets: [PHAsset]
-    var id: Date { date }
-}
+private typealias MonthBucket = LibraryTimeBucket
 
 private struct CategoryEntry: Identifiable {
     let category: MediaCategory

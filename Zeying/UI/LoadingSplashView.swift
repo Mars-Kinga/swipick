@@ -25,7 +25,7 @@ struct LoadingSplashView: View {
                 }
                 .multilineTextAlignment(.center)
 
-                LoadingDots(reduceMotion: reduceMotion)
+                LoadingDots(reduceMotion: reduceMotion, color: .white)
             }
             .foregroundStyle(.white)
             .padding(32)
@@ -34,6 +34,21 @@ struct LoadingSplashView: View {
         .ignoresSafeArea()
         .accessibilityElement(children: .contain)
         .accessibilityLabel(String(localized: "择影正在准备你的图库"))
+    }
+}
+
+/// Keep navigation inside the library visually continuous while a group is
+/// prepared. The launch artwork belongs only to the initial library load.
+struct GroupLoadingView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
+            LoadingDots(reduceMotion: reduceMotion, color: .primary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityLabel(String(localized: "正在准备照片"))
     }
 }
 
@@ -97,8 +112,9 @@ private struct LaunchGradientBackground: View {
 
 /// A quiet, non-rotating progress cue. TimelineView keeps the animation
 /// lightweight and lets reduced-motion users see a stable three-dot cue.
-private struct LoadingDots: View {
+struct LoadingDots: View {
     let reduceMotion: Bool
+    let color: Color
 
     var body: some View {
         Group {
@@ -119,7 +135,7 @@ private struct LoadingDots: View {
         HStack(spacing: 7) {
             ForEach(0..<3, id: \.self) { index in
                 Capsule(style: .continuous)
-                    .fill(.white.opacity(activeIndex == index ? 0.95 : 0.38))
+                    .fill(color.opacity(activeIndex == index ? 0.95 : 0.38))
                     .frame(width: activeIndex == index ? 13 : 5, height: 5)
                     .animation(.easeInOut(duration: 0.18), value: activeIndex)
             }

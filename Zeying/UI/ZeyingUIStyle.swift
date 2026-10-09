@@ -163,6 +163,10 @@ extension Date {
 
     var zeyingHomeMonthTitle: String {
         if Bundle.main.preferredLocalizations.first?.hasPrefix("zh") == true {
+            let components = Calendar.autoupdatingCurrent.dateComponents([.year, .month], from: self)
+            if let year = components.year, let month = components.month {
+                return "\(year)-\(month)"
+            }
             return zeyingMonthTitle
         }
         return formatted(.dateTime.month(.abbreviated).year(.twoDigits).locale(zeyingDisplayLocale))

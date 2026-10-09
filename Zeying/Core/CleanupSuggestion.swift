@@ -87,7 +87,7 @@ enum TemporaryScreenshotClassifier {
     }
 }
 
-struct SuggestionAsset: Codable, Equatable, Sendable {
+struct SuggestionAsset: Codable, Hashable, Sendable {
     let id: String
     let modifiedAt: Date?
     let createdAt: Date?
@@ -191,12 +191,14 @@ enum SuggestionGrouping {
         assets: [SuggestionAsset],
         analyses: [String: SuggestionAnalysis],
         now: Date = .now,
+        isCancelled: () -> Bool = { false },
         distance: (String, String) -> Float?
     ) -> [CleanupSuggestion] {
         let ordered = assets.sorted {
             if $0.createdAt != $1.createdAt { return ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
             return $0.id < $1.id
         }
+        guard !isCancelled() else { return [] }
         var used = Set<String>()
         var result: [CleanupSuggestion] = []
 
@@ -232,6 +234,7 @@ enum SuggestionGrouping {
         // Vision must agree before a suggestion is created.
         var bands: [UInt64: [Int]] = [:]
         for (index, asset) in ordered.enumerated() where !asset.isScreenshot {
+            guard !isCancelled() else { return [] }
             guard let analysis = analyses[asset.id], analysis.previewUnavailableAt == nil else { continue }
             for band in 0..<4 {
                 let key = (UInt64(band) << 16) | ((analysis.differenceHash >> (band * 16)) & 0xffff)
@@ -239,6 +242,7 @@ enum SuggestionGrouping {
             }
         }
         for (seedIndex, seed) in ordered.enumerated() where !used.contains(seed.id) && !seed.isScreenshot {
+            guard !isCancelled() else { return [] }
             guard let seedAnalysis = analyses[seed.id], seedAnalysis.previewUnavailableAt == nil else { continue }
             var candidates: [String: SuggestionAsset] = [:]
             for band in 0..<4 {
@@ -385,8 +389,8 @@ enum SuggestionCheckBudget {
         background: Bool = true,
         isCharging: Bool = false
     ) -> Bool {
-        thermalState == .critical ||
-            (background && (thermalState == .serious || (lowPowerMode && !isCharging)))
+        thermalState == .critical || thermalState == .serious ||
+            (background && lowPowerMode && !isCharging)
     }
 }
 
@@ -396,7 +400,18 @@ enum SuggestionScanPace {
     static func itemDelay(isCharging: Bool) -> Duration {
         isCharging ? .zero : .milliseconds(300)
     }
-    static func foregroundItemDelay(isCharging: Bool) -> Duration {
-        isCharging ? .milliseconds(120) : .milliseconds(300)
+    static func foregroundItemDelay(
+        isCharging: Bool,
+        thermalState: ProcessInfo.ThermalState = .nominal,
+        lowPowerMode: Bool = false
+    ) -> Duration {
+        if thermalState != .nominal || lowPowerMode { return .milliseconds(600) }
+        return isCharging ? .milliseconds(120) : .milliseconds(300)
+    }
+
+    static func effectiveDelay(background: Bool, isCharging: Bool) -> Duration {
+        let process = ProcessInfo.processInfo
+        if process.thermalState != .nominal || process.isLowPowerModeEnabled { return .milliseconds(600) }
+        return background ? itemDelay(isCharging: isCharging) : foregroundItemDelay(isCharging: isCharging)
     }
 }

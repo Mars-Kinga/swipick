@@ -288,8 +288,7 @@ struct ReviewQueueView: View {
     var body: some View {
         Group {
             if !hasLoaded {
-                ProgressView(String(localized: "正在准备照片…"))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                GroupLoadingView()
             } else if isComplete {
                 completedContent
             } else if let currentAsset {
@@ -301,7 +300,7 @@ struct ReviewQueueView: View {
         .navigationTitle(queueTitle)
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if let suggestedReason, !isComplete {
+            if let suggestedReason, hasLoaded, !isComplete {
                 Text(suggestedReason)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -688,7 +687,7 @@ struct ReviewQueueView: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 24)
         .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-        .task(id: "\(asset.localIdentifier)-\(upcomingAsset?.localIdentifier ?? "end")") {
+        .task(id: "\(asset.localIdentifier)-\(upcomingAsset?.localIdentifier ?? "end")-\(library.prefetchRevision)") {
             let currentIndex = index
             let nextIdentifier = queueIDs.indices.contains(currentIndex + 1) ? queueIDs[currentIndex + 1] : nil
             upcomingPreviewIdentifier = nextIdentifier
@@ -702,10 +701,7 @@ struct ReviewQueueView: View {
             if let next {
                 async let nextSize = sizes.automaticLocalSize(for: next)
                 if readyPreview == nil {
-                    var preview = await library.prepareReviewPreview(for: next)
-                    if preview == nil, next.mediaType == .image {
-                        preview = await library.cloudThumbnail(for: next)
-                    }
+                    let preview = await library.prepareUpcomingPreview(for: next)
                     guard !Task.isCancelled else { return }
                     // Avoid replacing the image texture in the middle of a drag.
                     // If the preview arrived late, the next card can still use it
@@ -718,8 +714,8 @@ struct ReviewQueueView: View {
                 _ = await nextSize
             }
         }
-        .task(id: "\(asset.localIdentifier)-\(library.assetRevision)") {
-            let libraryRevision = library.assetRevision
+        .task(id: "\(asset.localIdentifier)-\(library.albumMembershipRevision)") {
+            let libraryRevision = library.albumMembershipRevision
             let currentMembershipsReady = albumService.memberships(for: asset.localIdentifier) != nil
             if let nextIdentifier = upcomingAsset?.localIdentifier {
                 async let nextMemberships: Void = albumService.loadMemberships(
@@ -1263,7 +1259,7 @@ struct ReviewQueueView: View {
                     .multilineTextAlignment(.center)
 
                 if pendingConfirmationCount > 0 {
-                    Text(String(localized: "还有 \(pendingConfirmationCount) 项待完成操作，可到清单继续确认。"))
+                    Text(String(localized: "还有 \(pendingConfirmationCount) 项待确认操作，可到清单确认。"))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1292,7 +1288,7 @@ struct ReviewQueueView: View {
                     Button {
                         if let openSummaryTab { openSummaryTab() } else { dismiss() }
                     } label: {
-                        completedActionLabel(String(localized: "去清单继续"), symbol: "checklist")
+                        completedActionLabel(String(localized: "去清单确认"), symbol: "checklist")
                     }
                     .buttonStyle(ZeyingGlassButtonStyle())
                 }
@@ -1400,13 +1396,15 @@ struct ReviewQueueView: View {
                 prefetchCandidates(after: index),
                 keeping: firstIdentifier
             )
-            // Do not reveal a thumbnail that has to sharpen on screen.
-            if let first = library.asset(with: firstIdentifier), first.mediaType != .video {
-                _ = await library.prepareReviewPreview(for: first)
-                if queueIDs.indices.contains(index + 1),
-                   let second = library.asset(with: queueIDs[index + 1]), second.mediaType != .video {
-                    _ = await library.prepareReviewPreview(for: second)
+            if let first = library.asset(with: firstIdentifier) {
+                async let firstPreview = library.prepareReviewPreview(for: first)
+                async let memberships: Void = albumService.loadMemberships(
+                    for: firstIdentifier, libraryRevision: library.albumMembershipRevision)
+                if queueIDs.indices.contains(index + 1), let second = library.asset(with: queueIDs[index + 1]) {
+                    _ = await library.prepareUpcomingPreview(for: second)
                 }
+                _ = await firstPreview
+                await memberships
             }
         }
         guard !Task.isCancelled else { return }
