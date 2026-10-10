@@ -742,7 +742,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         let candidates = availableAssets(for: identifiers)
         let deletedIdentifiers = candidates.map(\.localIdentifier)
         guard !candidates.isEmpty else {
-            if !identifiers.isEmpty { await refresh() }
+            if !identifiers.isEmpty { scheduleRefresh() }
             return []
         }
 
@@ -755,7 +755,9 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             throw error
         }
 
-        await refresh()
+        // The registered PhotoKit change observer refreshes the snapshot.
+        // A synchronous full refresh here would scan the library a second
+        // time before List can finish its local deletion records.
         return deletedIdentifiers
     }
 

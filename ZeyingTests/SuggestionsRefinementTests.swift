@@ -224,6 +224,23 @@ struct SuggestionsRefinementTests {
         #expect(SuggestionScanOrder.ordered([photo, recent, old], now: now).map(\.id) == ["old", "ordinary"])
     }
 
+    @Test("90 天限制只用于截图，近期普通照片和已 Keep 照片仍可参与相似建议")
+    func recentComparisonPhotosRemainEligible() {
+        let recentPhoto = SuggestionAsset(id: "recent-photo", modifiedAt: now, createdAt: now,
+                                          width: 1200, height: 1600, isScreenshot: false, isLivePhoto: false,
+                                          burstID: nil, isProtected: false, isEligible: true)
+        let recentScreenshot = screenshot("recent-screen", age: 1)
+        #expect(SuggestionScanOrder.ordered([recentPhoto, recentScreenshot], now: now).map(\.id) == ["recent-photo"])
+        #expect(PhotoSuggestionService.isEligibleComparisonAsset(
+            isFavorite: false, decision: .keep, isPendingFavorite: false, hasAlbumAssignment: false))
+        #expect(!PhotoSuggestionService.isEligibleComparisonAsset(
+            isFavorite: true, decision: .keep, isPendingFavorite: false, hasAlbumAssignment: false))
+        #expect(!PhotoSuggestionService.isEligibleComparisonAsset(
+            isFavorite: false, decision: .delete, isPendingFavorite: false, hasAlbumAssignment: false))
+        #expect(!PhotoSuggestionService.isEligibleComparisonAsset(
+            isFavorite: false, decision: .keep, isPendingFavorite: false, hasAlbumAssignment: true))
+    }
+
     @Test("旧截图多时也会穿插检查普通照片")
     func manyScreenshotsDoNotStarveSimilarPhotos() {
         let screenshots = (0..<3).map { screenshot("screen-\($0)", age: TimeInterval(120 + $0) * 86_400) }
@@ -237,6 +254,26 @@ struct SuggestionsRefinementTests {
             "screen-0", "photo-0", "photo-1", "photo-2", "photo-3",
             "screen-1", "photo-4", "screen-2"
         ])
+    }
+
+    @Test("新导入的旧照片先于已有缓存照片分析")
+    func newlyImportedOldPhotoGoesFirst() {
+        let existing = SuggestionAsset(
+            id: "existing", modifiedAt: now, createdAt: now,
+            width: 1200, height: 1600, isScreenshot: false, isLivePhoto: false,
+            burstID: nil, isProtected: false, isEligible: true
+        )
+        let imported = SuggestionAsset(
+            id: "imported", modifiedAt: now, createdAt: now.addingTimeInterval(-365 * 86_400),
+            width: 1200, height: 1600, isScreenshot: false, isLivePhoto: false,
+            burstID: nil, isProtected: false, isEligible: true
+        )
+        #expect(SuggestionScanStartPolicy.hasNewAssets(
+            scannedIDs: ["existing"], currentAssets: [existing, imported]
+        ))
+        #expect(SuggestionScanOrder.ordered(
+            [existing, imported], now: now, analyzedIDs: ["existing"]
+        ).map(\.id) == ["imported", "existing"])
     }
 
     @Test("临时截图分类需要明确的完成状态或一次性内容证据")
@@ -370,6 +407,9 @@ struct SuggestionsRefinementTests {
         #expect(SuggestionScanPace.analysisLimit(isCharging: true) == .max)
         #expect(SuggestionScanPace.analysisLimit(isCharging: false) == 48)
         #expect(SuggestionScanPace.resourceLimit(isCharging: false) == 4)
+        #expect(SuggestionScanPace.resourceLimit(isCharging: true) == 16)
+        #expect(SuggestionScanPace.foregroundScoreLimit == 24)
+        #expect(SuggestionScanPace.foregroundResourceLimit == 4)
         #expect(SuggestionScanPace.itemDelay(isCharging: false) == .milliseconds(300))
         #expect(SuggestionScanPace.foregroundItemDelay(isCharging: true) == .milliseconds(120))
         #expect(SuggestionScanPace.foregroundItemDelay(isCharging: false) == .milliseconds(300))
@@ -421,6 +461,11 @@ struct SuggestionsRefinementTests {
             background: true, now: now
         )
         #expect(candidates.map(\.id) == assets.dropFirst(2).map(\.id))
+        let foregroundCandidates = SuggestionResourceVerification.candidates(
+            assets: assets, nominated: nominated, analyses: analyses, failures: failures,
+            background: false, now: now
+        )
+        #expect(foregroundCandidates.map(\.id) == assets.dropFirst(2).map(\.id))
 
         let afterCooldown = SuggestionResourceVerification.candidates(
             assets: assets, nominated: nominated, analyses: analyses, failures: failures,

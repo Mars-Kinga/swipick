@@ -22,6 +22,62 @@ struct SuggestionGroupingTests {
                            resourceDigest: digest, resourceBytes: digest == nil ? nil : 100, checkedResources: digest != nil)
     }
 
+    @Test("只有明确主体且面部质量差异可靠时才生成人像建议")
+    func portraitEvidenceCreatesVisibleSuggestion() {
+        let a = asset("portrait-a"), b = asset("portrait-b", seconds: 2)
+        var first = analysis(a)
+        var second = analysis(b)
+        first.portraitChecked = true
+        second.portraitChecked = true
+        first.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+        second.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+        first.portraitEvidence = SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: 0.62,
+                                                            largestFaceArea: 0.10)
+        second.portraitEvidence = SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: 0.625,
+                                                             largestFaceArea: 0.11)
+        first.portraitEvidence?.dominantFaceQuality = 0.62
+        first.portraitEvidence?.dominantCenterX = 0.5
+        first.portraitEvidence?.dominantCenterY = 0.5
+        first.portraitEvidence?.secondLargestFaceArea = 0
+        second.portraitEvidence?.dominantFaceQuality = 0.625
+        second.portraitEvidence?.dominantCenterX = 0.52
+        second.portraitEvidence?.dominantCenterY = 0.5
+        second.portraitEvidence?.secondLargestFaceArea = 0
+        var group = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: first, b.id: second], now: now) { _, _ in 0.10 }.first
+        #expect(group?.hasPortraitRecommendation == false)
+        second.portraitEvidence = SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: 0.34,
+                                                             largestFaceArea: 0.11)
+        second.portraitEvidence?.dominantFaceQuality = 0.34
+        second.portraitEvidence?.dominantCenterX = 0.52
+        second.portraitEvidence?.dominantCenterY = 0.5
+        second.portraitEvidence?.secondLargestFaceArea = 0
+        group = SuggestionGrouping.build(assets: [a, b], analyses: [a.id: first, b.id: second], now: now) { _, _ in 0.10 }.first
+        #expect(group?.hasPortraitRecommendation == true)
+        #expect(group?.displayTitle == String(localized: "相似照片"))
+        #expect(group?.portraitReason(for: a.id) != nil)
+        #expect(group?.portraitReason(for: b.id) == nil)
+    }
+
+    @Test("精彩组合只建议质量接近且画面有差异的几张照片")
+    func highlightKeepersFavorDistinctStrongShots() {
+        let photos = (0..<9).map { asset("p\($0)", seconds: TimeInterval($0)) }
+        let scores: [Float] = [0.85, 0.83, 0.81, 0.79, 0.75, 0.71, 0.68, 0.62, 0.58]
+        let analyses = Dictionary(uniqueKeysWithValues: zip(photos, scores).map { pair in
+            var value = analysis(pair.0)
+            value.aestheticScore = pair.1
+            return (pair.0.id, value)
+        })
+        let selected = SuggestionKeeperRanking.chooseHighlights(
+            members: photos, analyses: analyses, reason: .nearbyShots, primaryID: "p0"
+        ) { left, right in
+            Set([left, right]) == Set(["p0", "p1"]) ? 0.04 : 0.2
+        }
+        #expect(selected == ["p0", "p2", "p3"])
+        #expect(SuggestionKeeperRanking.chooseHighlights(
+            members: photos, analyses: analyses, reason: .possibleVersions,
+            primaryID: "p0", distance: { _, _ in 0.2 }) == ["p0"])
+    }
+
     @Test("修图版与原图画面相近但资源不同，只给比较参考，不归入重复副本")
     func editedVersionsRemainSeparateChoices() {
         let a = asset("original"), b = asset("edited", seconds: 1000)
@@ -85,6 +141,51 @@ struct SuggestionGroupingTests {
         #expect(groups.count == 1)
         #expect(Set(groups.first?.assetIDs ?? []) == Set(photos.map(\.id)))
         #expect(groups.first?.reason == .nearbyShots)
+    }
+
+    @Test("短时间内姿势变化的七张自拍归为一组，不混入相邻的不同照片")
+    func quickSelfieSequenceStaysTogether() {
+        let selfies = (0..<7).map { asset("selfie-\($0)", seconds: TimeInterval($0 * 9)) }
+        let unrelated = asset("different-scene", seconds: 31)
+        let photos = selfies + [unrelated]
+        // Distances measured from the seven selfie thumbnails in the reported
+        // example. Their different poses exceed the old 0.22 / 0.35 bounds.
+        let values: [[Float]] = [
+            [0, 0.239, 0.372, 0.369, 0.365, 0.336, 0.414],
+            [0.239, 0, 0.345, 0.318, 0.392, 0.339, 0.406],
+            [0.372, 0.345, 0, 0.249, 0.392, 0.368, 0.348],
+            [0.369, 0.318, 0.249, 0, 0.411, 0.378, 0.372],
+            [0.365, 0.392, 0.392, 0.411, 0, 0.219, 0.252],
+            [0.336, 0.339, 0.368, 0.378, 0.219, 0, 0.262],
+            [0.414, 0.406, 0.348, 0.372, 0.252, 0.262, 0]
+        ]
+        let indexByID = Dictionary(uniqueKeysWithValues: selfies.enumerated().map { ($0.element.id, $0.offset) })
+        let hashes: [UInt64] = [
+            0, 0x0000_0000_0000_01ff, 0x1234_5678_9abc_def0,
+            0xfedc_ba98_7654_3210, 0x1111_2222_3333_4444,
+            0x1111_2222_3333_4447, 0xaaaa_bbbb_cccc_dddd
+        ]
+        let analyses = Dictionary(uniqueKeysWithValues: photos.map { photo in
+            let hash = indexByID[photo.id].map { hashes[$0] } ?? UInt64.max
+            return (photo.id, analysis(photo, hash: hash))
+        })
+        let groups = SuggestionGrouping.build(assets: photos, analyses: analyses, now: now) { left, right in
+            guard let first = indexByID[left], let second = indexByID[right] else { return 0.55 }
+            return values[first][second]
+        }
+        #expect(groups.count == 1)
+        #expect(Set(groups[0].assetIDs) == Set(selfies.map(\.id)))
+        #expect(groups[0].reason == .nearbyShots)
+    }
+
+    @Test("姿势相近但间隔较久的照片仍使用严格的起组门槛")
+    func looserSelfieThresholdRequiresBriefCaptureWindow() {
+        let first = asset("first")
+        let second = asset("second", seconds: 120)
+        let groups = SuggestionGrouping.build(assets: [first, second], analyses: [
+            first.id: analysis(first), second.id: analysis(second, hash: 0x1ff)
+        ], now: now) { _, _ in 0.239 }
+        #expect(groups.isEmpty)
     }
 
     @Test("同一时段不同场景仍分组，不因时间接近而合并")

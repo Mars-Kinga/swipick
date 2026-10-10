@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import Zeying
 
@@ -33,6 +34,29 @@ struct LivePhotoConversionJournalTests {
         #expect(reopened.journalError == nil)
         #expect(reopened.conversion(for: "source")?.verification == verification)
         #expect(reopened.conversion(for: "source")?.stillIdentifier == "still-copy")
+    }
+
+    @Test("已加入待删除的转换只在清单出现，恢复后重新显示未完成转换")
+    func stagedConversionVisibilityFollowsDecisions() throws {
+        let suite = "ConversionVisibilityTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(try JSONEncoder().encode(["source": sample(verification: .verified)]),
+            forKey: "com.mars.zeying.liveConversionJournal.v1")
+        let conversions = LivePhotoConversionManager(defaults: defaults)
+        let container = try ModelContainer(
+            for: ReviewRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let reviews = ReviewStore(context: container.mainContext, defaults: defaults)
+
+        #expect(conversions.visiblePendingConversions(reviews: reviews).count == 1)
+        #expect(reviews.decide(.delete, for: "source"))
+        #expect(conversions.visiblePendingConversions(reviews: reviews).isEmpty)
+        #expect(reviews.decide(.delete, for: "still-copy"))
+        #expect(conversions.visiblePendingConversions(reviews: reviews).count == 1)
+        #expect(reviews.recoverPendingDeletions(["still-copy", "source"]))
+        #expect(conversions.visiblePendingConversions(reviews: reviews).count == 1)
     }
 
     private func sample(verification: LivePhotoConversion.Verification) -> LivePhotoConversion {

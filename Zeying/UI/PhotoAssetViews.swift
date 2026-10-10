@@ -285,17 +285,23 @@ struct AssetPreviewView: View {
                                 PreviewAudioSession.prepareMutedPreview()
                             }
                         }
-                        .overlay(alignment: .topTrailing) {
-                            if hasVideoFrame {
-                                ZeyingIconButton(
-                                    systemName: videoSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                                    accessibilityLabel: videoSoundEnabled ? String(localized: "静音本次审核的视频") : String(localized: "打开本次审核的视频声音"),
-                                    tint: .white
-                                ) {
-                                    toggleVideoSound(player)
+                        .onReceive(player.publisher(for: \.isMuted).receive(on: DispatchQueue.main)) { muted in
+                            guard isActive, activePlayerIdentifier == asset.localIdentifier,
+                                  self.player === player else { return }
+                            if muted {
+                                videoSoundEnabled = false
+                                PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
+                                PreviewAudioSession.prepareMutedPreview()
+                            } else if scenePhase == .active {
+                                if PreviewAudioSession.beginAudiblePreview(for: asset.localIdentifier) {
+                                    videoSoundEnabled = true
+                                } else {
+                                    player.isMuted = true
+                                    videoSoundEnabled = false
+                                    PreviewAudioSession.prepareMutedPreview()
                                 }
-                                .accessibilityHint(String(localized: "声音设置会用于后续视频，退出审核页后恢复默认静音；用设备音量按钮调整音量"))
-                                .padding(16)
+                            } else {
+                                videoSoundEnabled = true
                             }
                         }
                         .onDisappear { player.pause() }
@@ -315,7 +321,8 @@ struct AssetPreviewView: View {
                     allowCloudThumbnail: true
                 )
                     .overlay {
-                        if livePhotoAssetIdentifier == asset.localIdentifier,
+                        if isLivePhotoPressed,
+                           livePhotoAssetIdentifier == asset.localIdentifier,
                            let livePhoto {
                             ControlledLivePhotoView(
                                 livePhoto: livePhoto,
@@ -452,21 +459,6 @@ struct AssetPreviewView: View {
             livePhotoRequestTask = nil
             livePhoto = nil
             livePhotoAssetIdentifier = nil
-        }
-    }
-
-    private func toggleVideoSound(_ player: AVPlayer) {
-        if !videoSoundEnabled {
-            if player.timeControlStatus != .paused {
-                guard PreviewAudioSession.beginAudiblePreview(for: asset.localIdentifier) else { return }
-            }
-            player.isMuted = false
-            videoSoundEnabled = true
-        } else {
-            player.isMuted = true
-            videoSoundEnabled = false
-            PreviewAudioSession.stopAudiblePreview(for: asset.localIdentifier)
-            PreviewAudioSession.prepareMutedPreview()
         }
     }
 

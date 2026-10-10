@@ -18,6 +18,11 @@ struct SuggestionsView: View {
     @State private var isVisible = false
     @State private var shuffledGroupIDs: [String] = []
     @State private var showingSuggestionInfo = false
+    @AppStorage("com.mars.zeying.suggestionListOrder.v1") private var listOrderRaw = SuggestionListOrder.recommended.rawValue
+
+    private var listOrder: SuggestionListOrder {
+        SuggestionListOrder(rawValue: listOrderRaw) ?? .recommended
+    }
 
     private var groups: [CleanupSuggestion] {
         let source = suggestions.availableGroups(library: library, reviews: reviews)
@@ -28,16 +33,26 @@ struct SuggestionsView: View {
                 let b = positions[right.element.id] ?? Int.max
                 if a != b { return a < b }
             }
-            let a = categoryRank(left.element.kind)
-            let b = categoryRank(right.element.kind)
-            return a == b ? left.offset < right.offset : a < b
+            switch listOrder {
+            case .recommended:
+                let a = Double(categoryRank(left.element.kind)) - suggestions.orderLearning.score(for: left.element.reason)
+                let b = Double(categoryRank(right.element.kind)) - suggestions.orderLearning.score(for: right.element.reason)
+                return a == b ? left.offset < right.offset : a < b
+            case .oldestFirst, .newestFirst:
+                if left.element.newestDate != right.element.newestDate {
+                    guard let leftDate = left.element.newestDate else { return false }
+                    guard let rightDate = right.element.newestDate else { return true }
+                    return listOrder == .oldestFirst ? leftDate < rightDate : leftDate > rightDate
+                }
+                return left.offset < right.offset
+            }
         }.map(\.element)
     }
     var body: some View {
         let allGroups = groups
         let filteredGroups = allGroups.filter { filter == nil || $0.kind == filter }
         let resumedGroups: [CleanupSuggestion] = {
-            guard shuffledGroupIDs.isEmpty else { return [] }
+            guard shuffledGroupIDs.isEmpty, listOrder == .recommended else { return [] }
             let lookup = Dictionary(uniqueKeysWithValues: filteredGroups.map { ($0.id, $0) })
             return suggestions.resumeGroupIDs.compactMap { lookup[$0] }
         }()
@@ -80,7 +95,7 @@ struct SuggestionsView: View {
                     }
                 }
             } header: {
-                if !filteredGroups.isEmpty { Text(String(localized: shuffledGroupIDs.isEmpty ? "按推荐顺序" : "随机顺序")) }
+                if !filteredGroups.isEmpty { sortingMenu }
             }
 
             if let error = suggestions.errorMessage {
@@ -133,6 +148,11 @@ struct SuggestionsView: View {
                     if !suggestions.skippedIDs.isEmpty {
                         Button(String(localized: "恢复已跳过的建议"), systemImage: "arrow.uturn.backward") { suggestions.restoreSkipped() }
                     }
+                    if suggestions.orderLearning.hasHistory {
+                        Button(String(localized: "重置建议顺序"), systemImage: "arrow.counterclockwise") {
+                            suggestions.resetOrderLearning()
+                        }
+                    }
                 } label: { Image(systemName: "ellipsis") }
                 .accessibilityLabel(String(localized: "建议选项"))
             }
@@ -157,6 +177,7 @@ struct SuggestionsView: View {
         }
         .task(id: library.revision) { suggestions.startIfNeeded(library: library, reviews: reviews) }
         .onAppear { isVisible = true }
+        .onChange(of: listOrderRaw) { _, _ in shuffledGroupIDs.removeAll() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active && isVisible { suggestions.startIfNeeded(library: library, reviews: reviews) }
         }
@@ -219,6 +240,32 @@ struct SuggestionsView: View {
         .accessibilityLabel(String(localized: "建议类型"))
     }
 
+    private var sortingMenu: some View {
+        Menu {
+            ForEach(SuggestionListOrder.allCases, id: \.rawValue) { order in
+                Button {
+                    listOrderRaw = order.rawValue
+                    shuffledGroupIDs.removeAll()
+                } label: {
+                    if listOrder == order && shuffledGroupIDs.isEmpty {
+                        Label(order.title, systemImage: "checkmark")
+                    } else {
+                        Text(order.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(shuffledGroupIDs.isEmpty ? listOrder.title : String(localized: "随机顺序"))
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+            }
+            .font(.subheadline.weight(.semibold))
+        }
+        .textCase(nil)
+        .accessibilityLabel(String(localized: "建议排序"))
+    }
+
     private func categoryTitle(_ kind: SuggestionKind?) -> String {
         switch kind {
         case nil: String(localized: "全部")
@@ -261,7 +308,8 @@ struct SuggestionsView: View {
     private var suggestionDetails: String {
         var details = [
             categoryExplanation,
-            String(localized: "清理建议在设备上生成，分析过程无需将照片发送到外部服务。")
+            String(localized: "清理建议在设备上生成，分析过程无需将照片发送到外部服务。"),
+            String(localized: "建议顺序会根据你在本机的完成和跳过操作微调，可随时重置。")
         ]
         if library.authorizationStatus == .limited {
             details.append(String(localized: "建议仅来自当前获准访问的照片。"))
@@ -279,7 +327,7 @@ struct SuggestionsView: View {
         }
         return ContentUnavailableView {
             Label(String(localized: suggestions.isScanning ? "正在寻找建议" : "暂无清理建议"),
-                  systemImage: filter == .screenshots ? "rectangle.dashed" : "wand.and.stars")
+                  systemImage: filter.map { categorySymbol($0) } ?? "wand.and.stars")
         } description: {
             if filter == .screenshots {
                 Text(suggestions.isScanning
@@ -308,6 +356,18 @@ struct SuggestionsView: View {
     }
 }
 
+private enum SuggestionListOrder: String, CaseIterable {
+    case recommended, oldestFirst, newestFirst
+
+    var title: String {
+        switch self {
+        case .recommended: String(localized: "按推荐顺序")
+        case .oldestFirst: String(localized: "按时间 · 由早到晚")
+        case .newestFirst: String(localized: "按时间 · 由晚到早")
+        }
+    }
+}
+
 private struct SuggestionScanStatusView: View {
     let library: PhotoLibraryService
     let reviews: ReviewStore
@@ -316,7 +376,11 @@ private struct SuggestionScanStatusView: View {
     var body: some View {
         Group {
             if suggestions.isScanning {
-                if let percent = suggestions.scanProgressPercent {
+                if (suggestions.scanProgressPercent ?? 0) >= 99 {
+                    Text(String(localized: suggestions.groups.isEmpty
+                        ? "正在检查剩余照片…" : "建议已可使用，仍在检查剩余照片。"))
+                        .font(.subheadline).foregroundStyle(.secondary)
+                } else if let percent = suggestions.scanProgressPercent {
                     Text(String(format: String(localized: "正在检查你的照片… %d%%"), percent))
                         .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
                 } else {

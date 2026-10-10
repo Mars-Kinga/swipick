@@ -34,11 +34,11 @@ struct FirstUseGuideView: View {
                 GuideTip(symbol: "questionmark.circle", title: String(localized: "待决定"),
                          detail: String(localized: "还没想好时，可下滑放入“待决定”；之后从首页打开，再选择保留或删除。")),
                 GuideTip(symbol: "livephoto.slash", title: String(localized: "转为静态照片"),
-                         detail: String(localized: "点此图标把实况照片转为静态副本，不保留动态画面和声音，更节约空间。原拍摄时间保留，但“最近添加”位置可能改变。")),
+                         detail: String(localized: "创建静态照片后，原实况照片会进入清单等待删除确认。拍摄时间不变，但“最近添加”位置会改变。")),
                 GuideTip(symbol: "rectangle.stack.badge.plus", title: String(localized: "相簿整理"),
                          detail: String(localized: "照片上方可选相簿；待加入的相簿再点一次可取消。")),
                 GuideTip(symbol: "speaker.slash", title: String(localized: "视频声音"),
-                         detail: String(localized: "视频默认静音；点扬声器即可播放声音。")),
+                         detail: String(localized: "视频默认静音；点按视频，再点扬声器开启声音。")),
                 GuideTip(symbol: "info.circle", title: String(localized: "详情与分享"),
                          detail: String(localized: "右上角可查看日期、尺寸和文件大小，也可以随时分享。"))
             ]

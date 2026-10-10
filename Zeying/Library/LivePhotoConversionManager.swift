@@ -133,6 +133,9 @@ final class LivePhotoConversionManager {
     private static let completedKey = "com.mars.zeying.completedLiveConversions.v1"
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var inFlight: Set<String> = []
+    @ObservationIgnored private var warmedExport: (
+        identifier: String, modificationDate: Date?, task: Task<ExportedStill, Error>
+    )?
     @ObservationIgnored private var completedIdentifiers: Set<String>
     private(set) var pending: [String: LivePhotoConversion]
     private(set) var convertedCount: Int
@@ -162,8 +165,39 @@ final class LivePhotoConversionManager {
         pending.values.sorted { $0.creationDate > $1.creationDate }
     }
 
+    func visiblePendingConversions(reviews: ReviewStore) -> [LivePhotoConversion] {
+        pendingConversions.filter { record in
+            record.phase != .awaitingOriginalDeletion ||
+                record.verification != .verified ||
+                reviews.decision(for: record.sourceIdentifier) != .delete ||
+                record.stillIdentifier.map { reviews.decision(for: $0) == .delete } == true
+        }
+    }
+
     func conversion(for sourceIdentifier: String) -> LivePhotoConversion? {
         pending[sourceIdentifier]
+    }
+
+    /// Start reading the current still while the conversion sheet is on
+    /// screen. Only one export is retained, and dismissing the sheet cancels it.
+    func prewarmStill(for asset: PHAsset) {
+        let identifier = asset.localIdentifier
+        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized,
+              asset.mediaSubtypes.contains(.photoLive), pending[identifier] == nil else { return }
+        if warmedExport?.identifier == identifier,
+           warmedExport?.modificationDate == asset.modificationDate { return }
+        warmedExport?.task.cancel()
+        warmedExport = (
+            identifier,
+            asset.modificationDate,
+            Task(priority: .userInitiated) { try await Self.exportCurrentStill(for: asset) }
+        )
+    }
+
+    func cancelPrewarm(for identifier: String) {
+        guard let warmedExport, warmedExport.identifier == identifier else { return }
+        self.warmedExport = nil
+        warmedExport.task.cancel()
     }
 
     func prepare(asset: PHAsset, library: PhotoLibraryService) async throws -> LivePhotoConversion {
@@ -237,7 +271,7 @@ final class LivePhotoConversionManager {
 
         let exported: ExportedStill
         do {
-            exported = try await Self.exportCurrentStill(for: original)
+            exported = try await exportCurrentStill(for: original)
         } catch is CancellationError {
             try? remove(sourceIdentifier)
             throw CancellationError()
@@ -364,11 +398,84 @@ final class LivePhotoConversionManager {
             try store(record)
         }
         try finishLocalState(record, reviews: reviews, albumAssignments: albumAssignments)
-        await library.refresh()
+        // The PhotoKit commit and local records are complete. Refresh the
+        // library snapshot without keeping the conversion sheet on screen.
+        Task { await library.refresh() }
+    }
+
+    /// A verified copy is already in Photos. Stage only the original Live
+    /// Photo; its system deletion happens with other deletions in the List.
+    func stageOriginalForDeletion(
+        sourceIdentifier: String,
+        reviews: ReviewStore
+    ) throws {
+        try requireReadableJournal()
+        try requireFullAccess()
+        guard var record = pending[sourceIdentifier], let stillIdentifier = record.stillIdentifier,
+              record.phase == .awaitingOriginalDeletion else {
+            throw LivePhotoConversionError.conversionMissing
+        }
+        guard reviews.decision(for: stillIdentifier) != .delete else {
+            throw LivePhotoConversionError.copyUnverified(
+                String(localized: "静态副本也在待删除清单中，请先恢复它")
+            )
+        }
+        try verifyAndStore(&record, requireOriginal: true)
+        if reviews.decision(for: sourceIdentifier) != .delete {
+            guard reviews.decide(.delete, for: sourceIdentifier) else {
+                throw LivePhotoConversionError.copyUnverified(
+                    reviews.errorMessage ?? String(localized: "无法保存待删除决定")
+                )
+            }
+        }
+    }
+
+    /// Recheck every converted original before PhotoKit receives a batch
+    /// deletion request. A missing or changed copy blocks the whole batch.
+    func verifyStagedOriginals(in identifiers: [String], reviews: ReviewStore) throws {
+        try requireReadableJournal()
+        let selected = Set(identifiers)
+        for identifier in identifiers {
+            guard var record = pending[identifier] else { continue }
+            guard let stillIdentifier = record.stillIdentifier,
+                  record.phase == .awaitingOriginalDeletion else {
+                throw LivePhotoConversionError.conversionMissing
+            }
+            guard reviews.decision(for: stillIdentifier) != .delete,
+                  !selected.contains(stillIdentifier) else {
+                throw LivePhotoConversionError.copyUnverified(
+                    String(localized: "静态副本也在待删除清单中，请先恢复它")
+                )
+            }
+            try verifyAndStore(&record, requireOriginal: true)
+        }
+    }
+
+    /// Finish the journal after the List's single PhotoKit transaction has
+    /// deleted an original. A failure keeps the journal for reconciliation.
+    func finishStagedOriginalDeletion(
+        sourceIdentifier: String,
+        reviews: ReviewStore,
+        albumAssignments: PendingAlbumAssignmentStore
+    ) throws {
+        guard var record = pending[sourceIdentifier], record.stillIdentifier != nil else {
+            throw LivePhotoConversionError.conversionMissing
+        }
+        guard Self.fetchAsset(sourceIdentifier) == nil else {
+            throw LivePhotoConversionError.deletionFailed(
+                String(localized: "系统尚未确认原件已移除")
+            )
+        }
+        record.phase = .originalDeleted
+        try store(record)
+        try verifyAndStore(&record, requireOriginal: false)
+        try finishLocalState(record, reviews: reviews, albumAssignments: albumAssignments)
     }
 
     /// Offers a way to abandon the operation without leaving a duplicate.
-    func deleteStillCopy(sourceIdentifier: String, library: PhotoLibraryService) async throws {
+    func deleteStillCopy(
+        sourceIdentifier: String, library: PhotoLibraryService, reviews: ReviewStore
+    ) async throws {
         try requireReadableJournal()
         try requireFullAccess()
         guard inFlight.insert(sourceIdentifier).inserted else {
@@ -383,6 +490,13 @@ final class LivePhotoConversionManager {
         guard let source = Self.fetchAsset(sourceIdentifier),
               source.mediaSubtypes.contains(.photoLive) else {
             throw LivePhotoConversionError.originalUnavailable
+        }
+        // Never leave the original staged for deletion while removing the
+        // only verified still copy that made that deletion safe.
+        guard reviews.recoverPendingDeletions([sourceIdentifier]) else {
+            throw LivePhotoConversionError.copyUnverified(
+                reviews.errorMessage ?? String(localized: "无法恢复待删除项目。")
+            )
         }
         if Self.fetchAsset(stillIdentifier) != nil {
             guard let still = Self.fetchAsset(stillIdentifier) else {
@@ -409,9 +523,14 @@ final class LivePhotoConversionManager {
         guard journalError == nil else { return }
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else { return }
         for record in pendingConversions {
-            if record.phase == .originalDeleted {
+            if record.phase == .originalDeleted ||
+                (record.stillIdentifier != nil && Self.fetchAsset(record.sourceIdentifier) == nil) {
                 var updated = record
                 do {
+                    if updated.phase != .originalDeleted {
+                        updated.phase = .originalDeleted
+                        try store(updated)
+                    }
                     try verifyAndStore(&updated, requireOriginal: false)
                     try finishLocalState(
                         updated, reviews: reviews, albumAssignments: albumAssignments
@@ -586,6 +705,21 @@ final class LivePhotoConversionManager {
             albums.append(album)
         }
         return albums
+    }
+
+    private func exportCurrentStill(for asset: PHAsset) async throws -> ExportedStill {
+        if let warmedExport,
+           warmedExport.identifier == asset.localIdentifier,
+           warmedExport.modificationDate == asset.modificationDate {
+            self.warmedExport = nil
+            return try await withTaskCancellationHandler {
+                try await warmedExport.task.value
+            } onCancel: {
+                warmedExport.task.cancel()
+            }
+        }
+        cancelPrewarm(for: asset.localIdentifier)
+        return try await Self.exportCurrentStill(for: asset)
     }
 
     private static func findStill(with token: UUID, date: Date) async -> String? {

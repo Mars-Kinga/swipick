@@ -8,6 +8,9 @@ struct PendingLiveConversionsSection: View {
 
     @State private var selected: LivePhotoConversion?
     private let conversions = LivePhotoConversionManager.shared
+    private var visibleConversions: [LivePhotoConversion] {
+        conversions.visiblePendingConversions(reviews: reviews)
+    }
 
     var body: some View {
         if let journalError = conversions.journalError {
@@ -23,9 +26,9 @@ struct PendingLiveConversionsSection: View {
             }
         }
 
-        if !conversions.pendingConversions.isEmpty {
+        if !visibleConversions.isEmpty {
             Section {
-                ForEach(conversions.pendingConversions) { record in
+                ForEach(visibleConversions) { record in
                     Button {
                         selected = record
                     } label: {
@@ -67,8 +70,6 @@ struct PendingLiveConversionsSection: View {
                 Label(String(localized: "待完成静态转换"), systemImage: "livephoto.slash")
                     .zeyingAlignedGroupedSectionHeader()
                     .textCase(nil)
-            } footer: {
-                Text(String(localized: "静态照片核对通过后，iOS 会确认是否删除原实况照片。"))
             }
             .sheet(item: $selected) { record in
                 LivePhotoConversionSheet(
@@ -100,7 +101,7 @@ struct PendingLiveConversionsSection: View {
         }
         switch record.verification {
         case .verified:
-            return String(localized: "静态副本已核对，可确认删除原件")
+            return String(localized: "静态照片已就绪，可将原件加入待删除")
         case .pending:
             return String(localized: "静态副本等待核对")
         case .failed:

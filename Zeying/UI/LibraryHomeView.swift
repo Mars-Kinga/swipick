@@ -49,7 +49,7 @@ struct LibraryHomeView: View {
 
     private var pendingConfirmationCount: Int {
         pendingDeleteCount + pendingFavoriteCount + albumAssignments.count +
-            LivePhotoConversionManager.shared.pendingConversions.count +
+            LivePhotoConversionManager.shared.visiblePendingConversions(reviews: reviews).count +
             (LivePhotoConversionManager.shared.journalError == nil ? 0 : 1)
     }
 
@@ -58,7 +58,7 @@ struct LibraryHomeView: View {
             (String(localized: "待删除"), pendingDeleteCount),
             (String(localized: "待收藏"), pendingFavoriteCount),
             (String(localized: "待整理"), albumAssignments.count),
-            (String(localized: "静态转换"), LivePhotoConversionManager.shared.pendingConversions.count),
+            (String(localized: "静态转换"), LivePhotoConversionManager.shared.visiblePendingConversions(reviews: reviews).count),
             (String(localized: "转换记录待检查"), LivePhotoConversionManager.shared.journalError == nil ? 0 : 1)
         ]
         return parts.filter { $0.1 > 0 }

@@ -148,7 +148,7 @@ struct ReviewQueueView: View {
             .filter { library.asset(with: $0) != nil }
             .count
         return deletions + favorites + albumAssignments.count +
-            LivePhotoConversionManager.shared.pendingConversions.count +
+            LivePhotoConversionManager.shared.visiblePendingConversions(reviews: reviews).count +
             (LivePhotoConversionManager.shared.journalError == nil ? 0 : 1)
     }
 
@@ -1516,8 +1516,8 @@ struct ReviewQueueView: View {
         let localY = point.y - videoCardFrame.minY
         let playbackControlsHeight = min(max(videoCardFrame.height * 0.22, 60), 90)
         guard localY < videoCardFrame.height - playbackControlsHeight else { return false }
-        // The sound button owns the upper-right corner of the video.
-        return !(localX > videoCardFrame.width - 72 && localY < 72)
+        // AVKit owns its upper-corner controls after the video is tapped.
+        return !(localY < 72 && (localX < 72 || localX > videoCardFrame.width - 72))
     }
 
     private func prepareShare(for asset: PHAsset) async {
@@ -2095,8 +2095,16 @@ struct ReviewQueueView: View {
                 guard !isPinching, !isZooming, previewScale <= 1.01,
                       swipeAxis == nil, !isTransitioning else { return }
                 switch value {
-                case .first(true), .second(true, _):
+                case .first(true):
                     state = true
+                case .second(true, let drag):
+                    // A hold may turn into a review swipe. Stop Live playback
+                    // as soon as the finger moves away from the hold point.
+                    if let drag {
+                        state = hypot(drag.translation.width, drag.translation.height) < 10
+                    } else {
+                        state = true
+                    }
                 default:
                     break
                 }

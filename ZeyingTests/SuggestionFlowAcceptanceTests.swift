@@ -5,20 +5,38 @@ import Testing
 
 @MainActor
 struct SuggestionFlowAcceptanceTests {
-    @Test("全部删除只将本组加入待删，保留已保护照片并可整组撤销")
+    @Test("全部删除允许改动普通保留，保护待收藏，并可整组撤销")
     func stageEntireGroupForDeletionAndUndo() throws {
         let container = try ModelContainer(for: ReviewRecord.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
         let store = ReviewStore(context: container.mainContext)
-        #expect(store.decide(.keep, for: "protected"))
-        #expect(store.stageGroupForDeletion(["a", "b", "protected"]))
+        #expect(store.decide(.keep, for: "previouslyKept"))
+        #expect(store.stageFavorite(for: "protected", alreadyFavorite: false))
+        #expect(store.stageGroupForDeletion(["a", "b", "previouslyKept", "protected"]))
         let token = try #require(store.latestUndoToken)
         #expect(store.decision(for: "a") == .delete)
         #expect(store.decision(for: "b") == .delete)
+        #expect(store.decision(for: "previouslyKept") == .delete)
         #expect(store.decision(for: "protected") == .keep)
+        #expect(store.isPendingFavorite("protected"))
         #expect(store.undo(matching: token))
         #expect(store.decision(for: "a") == nil)
         #expect(store.decision(for: "b") == nil)
+        #expect(store.decision(for: "previouslyKept") == .keep)
         #expect(store.decision(for: "protected") == .keep)
+    }
+
+    @Test("建议组取消已保留照片后可选择另一张，撤销恢复原决定")
+    func priorKeepCanBeDeselectedAndUndone() throws {
+        let container = try ModelContainer(for: ReviewRecord.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let store = ReviewStore(context: container.mainContext)
+        #expect(store.decide(.keep, for: "old"))
+        #expect(store.decideGroup(["old", "new"], keeping: ["new"]))
+        let token = try #require(store.latestUndoToken)
+        #expect(store.decision(for: "old") == .delete)
+        #expect(store.decision(for: "new") == .keep)
+        #expect(store.undo(matching: token))
+        #expect(store.decision(for: "old") == .keep)
+        #expect(store.decision(for: "new") == nil)
     }
 
     @Test("两组决定的 token 只能撤销对应最新组，撤销结果重新读取仍正确")

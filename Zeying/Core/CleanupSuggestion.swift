@@ -120,6 +120,9 @@ struct SuggestionAnalysis: Codable, Sendable {
     /// caches are filled only for assets that enter a comparison group.
     var aestheticScore: Float? = nil
     var aestheticChecked: Bool? = nil
+    var portraitEvidence: SuggestionPortraitEvidence? = nil
+    var portraitChecked: Bool? = nil
+    var portraitClassifierVersion: Int? = nil
 
     func matches(_ current: SuggestionAsset) -> Bool {
         asset.id == current.id && asset.modifiedAt == current.modifiedAt &&
@@ -144,6 +147,30 @@ enum SuggestionRecommendationBasis: String, Codable, Hashable, Sendable {
     case protected, visionAesthetics, resolution, identicalResources
 }
 
+/// Evidence from a small local preview, checked only for an opened comparison.
+/// A missing observation is never treated as proof that a face is absent.
+struct SuggestionPortraitEvidence: Codable, Hashable, Sendable {
+    let faceCount: Int
+    let averageCaptureQuality: Float?
+    let largestFaceArea: Float
+    var dominantFaceQuality: Float? = nil
+    var dominantCenterX: Float? = nil
+    var dominantCenterY: Float? = nil
+    var secondLargestFaceArea: Float? = nil
+
+    static let classifierVersion = 3
+
+    var hasUsefulFace: Bool { faceCount > 0 && largestFaceArea >= 0.012 }
+
+    var hasClearSubject: Bool {
+        guard largestFaceArea >= 0.025, let dominantCenterX, let dominantCenterY,
+              let secondLargestFaceArea else { return false }
+        return abs(dominantCenterX - 0.5) <= 0.4 &&
+            abs(dominantCenterY - 0.5) <= 0.4 &&
+            secondLargestFaceArea <= largestFaceArea * 0.8
+    }
+}
+
 struct CleanupSuggestion: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let kind: SuggestionKind
@@ -154,9 +181,27 @@ struct CleanupSuggestion: Identifiable, Codable, Hashable, Sendable {
     let knownBytes: Int64?
     let newestDate: Date?
     var recommendationBasis: SuggestionRecommendationBasis? = nil
+    var suggestedKeeperIDs: Set<String>? = nil
     var aestheticLead: Float? = nil
     var aestheticScores: [String: Float] = [:]
     var aestheticEvaluationComplete = false
+    var portraitEvidence: [String: SuggestionPortraitEvidence]? = nil
+    var portraitEvaluationComplete: Bool? = nil
+    var portraitClassifierVersion: Int? = nil
+
+    var hasPortraitRecommendation: Bool {
+        guard kind == .similar, portraitEvaluationComplete == true,
+              portraitClassifierVersion == SuggestionPortraitEvidence.classifierVersion,
+              let portraitEvidence, !portraitEvidence.isEmpty else { return false }
+        return assetIDs.contains { portraitReason(for: $0) != nil }
+    }
+
+    var visibleSuggestedKeeperIDs: Set<String> {
+        let valid = (suggestedKeeperIDs ?? []).intersection(assetIDs)
+        if !valid.isEmpty { return valid }
+        guard let recommendedKeepID, assetIDs.contains(recommendedKeepID) else { return [] }
+        return [recommendedKeepID]
+    }
 
     var priority: Int {
         switch reason {
@@ -167,6 +212,48 @@ struct CleanupSuggestion: Identifiable, Codable, Hashable, Sendable {
         case .olderScreenshots, .olderOrders, .olderPickupCodes, .olderVerificationCodes,
              .olderDeliveries, .expiredOffers: 1
         }
+    }
+
+    func portraitReason(for assetID: String) -> String? {
+        guard kind == .similar,
+              portraitClassifierVersion == SuggestionPortraitEvidence.classifierVersion,
+              let evidence = portraitEvidence,
+              let candidate = evidence[assetID], candidate.hasUsefulFace else { return nil }
+        let peers = assetIDs.filter { $0 != assetID }.compactMap { evidence[$0] }
+            .filter(\.hasUsefulFace)
+        guard !peers.isEmpty else { return nil }
+        let quality = candidate.averageCaptureQuality ?? candidate.dominantFaceQuality
+        let highestOtherQuality = peers.compactMap { $0.averageCaptureQuality ?? $0.dominantFaceQuality }.max()
+        let qualityNotWorse: Bool
+        if let quality, let highestOtherQuality {
+            qualityNotWorse = quality >= highestOtherQuality - 0.05
+        } else {
+            qualityNotWorse = true
+        }
+        if let quality, let highestOtherQuality, quality - highestOtherQuality >= 0.10 {
+            return String(localized: "人物面部成像质量更好")
+        }
+        if let quality, let highestOtherQuality, quality - highestOtherQuality >= 0.015 {
+            return String(localized: "面部成像评分略高")
+        }
+        if candidate.hasClearSubject,
+           let largestOther = peers.filter(\.hasClearSubject).map(\.largestFaceArea).max(),
+           candidate.largestFaceArea - largestOther >= 0.018,
+           candidate.largestFaceArea >= largestOther * 1.35,
+           qualityNotWorse {
+            return String(localized: "主体面部在画面中更大")
+        }
+        let comparableIDs = assetIDs.filter { $0 != assetID && evidence[$0]?.hasUsefulFace == true }
+        let highestOtherScore = comparableIDs.compactMap { aestheticScores[$0] }.max()
+        if let score = aestheticScores[assetID], let highestOtherScore,
+           score - highestOtherScore >= 0.12 {
+            return String(localized: "人像画面整体观感更好")
+        }
+        if let score = aestheticScores[assetID], let highestOtherScore,
+           score - highestOtherScore >= 0.02 {
+            return String(localized: "人像画面评分略高")
+        }
+        return nil
     }
 
     static func signature(kind: SuggestionKind, assets: [SuggestionAsset]) -> String {
@@ -186,6 +273,14 @@ enum SuggestionGrouping {
     // prevents chain merging across unrelated endpoints.
     private static let nearbyPairDistance: Float = 0.22
     private static let nearbySceneDistance: Float = 0.35
+    // A short run of selfies can change poses enough to exceed the general
+    // scene threshold. Only use these bounds within the same brief capture
+    // window, and still compare a candidate with every member of the group.
+    private static let quickSequenceWindow: TimeInterval = 90
+    private static let quickSequencePairDistance: Float = 0.26
+    private static let quickSequenceSceneDistance: Float = 0.43
+    private static let quickSequenceNeighborDistance: Float = 0.38
+    private static let quickSequencePairHashBits = 18
 
     static func build(
         assets: [SuggestionAsset],
@@ -214,12 +309,22 @@ enum SuggestionGrouping {
                 newestDate: members.compactMap(\.createdAt).max()
             )
             suggestion.recommendationBasis = recommendation.basis
+            suggestion.suggestedKeeperIDs = SuggestionKeeperRanking.chooseHighlights(
+                members: members, analyses: analyses, reason: reason,
+                primaryID: recommendation.id, distance: distance)
             suggestion.aestheticLead = recommendation.lead
             suggestion.aestheticScores = Dictionary(uniqueKeysWithValues: members.compactMap { member in
                 analyses[member.id]?.aestheticScore.map { (member.id, $0) }
             })
             suggestion.aestheticEvaluationComplete = kind == .similar &&
                 members.allSatisfy { analyses[$0.id]?.aestheticChecked == true }
+            if kind == .similar && members.allSatisfy({ analyses[$0.id]?.portraitClassifierVersion == SuggestionPortraitEvidence.classifierVersion }) {
+                suggestion.portraitEvidence = Dictionary(uniqueKeysWithValues: members.compactMap { member in
+                    analyses[member.id]?.portraitEvidence.map { (member.id, $0) }
+                })
+                suggestion.portraitEvaluationComplete = true
+                suggestion.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+            }
             result.append(suggestion)
             used.formUnion(members.map(\.id))
         }
@@ -288,11 +393,28 @@ enum SuggestionGrouping {
                         guard let date = candidate.createdAt else { continue }
                         let sameBurst = seed.burstID != nil && seed.burstID == candidate.burstID
                         if date.timeIntervalSince(seedDate) > 5 * 60 && !sameBurst { break }
-                        let threshold = members.count >= 2 ? nearbySceneDistance : nearbyPairDistance
+                        let quickSequence = date.timeIntervalSince(seedDate) <= quickSequenceWindow &&
+                            abs(candidate.aspectRatio - seed.aspectRatio) < 0.08
+                        let threshold = members.count >= 2
+                            ? (quickSequence ? quickSequenceSceneDistance : nearbySceneDistance)
+                            : (quickSequence ? quickSequencePairDistance : nearbyPairDistance)
                         guard !used.contains(candidate.id), !memberIDs.contains(candidate.id),
                               !candidate.isScreenshot, candidate.isLivePhoto == seed.isLivePhoto,
-                              abs(candidate.aspectRatio - seed.aspectRatio) < 0.15,
-                              members.allSatisfy({ (distance($0.id, candidate.id) ?? 1) < threshold }) else { continue }
+                              abs(candidate.aspectRatio - seed.aspectRatio) < 0.15 else { continue }
+                        var closestDistance: Float = 1
+                        let matchesEveryMember = members.allSatisfy { member in
+                            let value = distance(member.id, candidate.id) ?? 1
+                            closestDistance = min(closestDistance, value)
+                            return value < threshold
+                        }
+                        let closeHash = analyses[candidate.id].map { candidateAnalysis in
+                            (seedAnalysis.differenceHash ^ candidateAnalysis.differenceHash).nonzeroBitCount <= quickSequencePairHashBits
+                        } ?? false
+                        guard matchesEveryMember,
+                              !quickSequence || members.count >= 2 ||
+                              closestDistance < nearbyPairDistance || closeHash,
+                              !quickSequence || members.count < 2 ||
+                              closestDistance < quickSequenceNeighborDistance else { continue }
                         members.append(candidate)
                         memberIDs.insert(candidate.id)
                         addedNearbyShot = true
@@ -356,6 +478,33 @@ enum SuggestionKeeperRanking {
         }
         return (nil, nil, nil)
     }
+
+    static func chooseHighlights(
+        members: [SuggestionAsset], analyses: [String: SuggestionAnalysis],
+        reason: SuggestionReason, primaryID: String?,
+        distance: (String, String) -> Float?
+    ) -> Set<String> {
+        guard let primaryID, members.contains(where: { $0.id == primaryID }) else { return [] }
+        var selected = [primaryID]
+        guard case .nearbyShots = reason, members.count >= 4,
+              !members.contains(where: { $0.id == primaryID && $0.isProtected }),
+              let topScore = analyses[primaryID]?.aestheticScore, topScore.isFinite else {
+            return Set(selected)
+        }
+        let limit = min(4, max(2, members.count / 3))
+        let candidates = members.compactMap { member -> (id: String, score: Float)? in
+            guard member.id != primaryID, !member.isProtected,
+                  let score = analyses[member.id]?.aestheticScore, score.isFinite,
+                  score >= topScore - 0.08 else { return nil }
+            return (member.id, score)
+        }.sorted { $0.score == $1.score ? $0.id < $1.id : $0.score > $1.score }
+        for candidate in candidates {
+            guard selected.allSatisfy({ (distance($0, candidate.id) ?? 0) >= 0.16 }) else { continue }
+            selected.append(candidate.id)
+            if selected.count >= limit { break }
+        }
+        return Set(selected)
+    }
 }
 
 enum SuggestionReviewQueue {
@@ -365,10 +514,15 @@ enum SuggestionReviewQueue {
     }
 
     static func orderedAssetIDs(in group: CleanupSuggestion) -> [String] {
-        group.assetIDs.enumerated().sorted { left, right in
+        let portraitSuggestedIDs = Set(group.assetIDs.filter { group.portraitReason(for: $0) != nil })
+        return group.assetIDs.enumerated().sorted { left, right in
             let leftRecommended = left.element == group.recommendedKeepID
             let rightRecommended = right.element == group.recommendedKeepID
             if leftRecommended != rightRecommended { return leftRecommended }
+
+            let leftHasPortraitSuggestion = portraitSuggestedIDs.contains(left.element)
+            let rightHasPortraitSuggestion = portraitSuggestedIDs.contains(right.element)
+            if leftHasPortraitSuggestion != rightHasPortraitSuggestion { return leftHasPortraitSuggestion }
 
             let leftScore = group.aestheticScores[left.element].flatMap { $0.isFinite ? $0 : nil }
             let rightScore = group.aestheticScores[right.element].flatMap { $0.isFinite ? $0 : nil }
@@ -379,6 +533,11 @@ enum SuggestionReviewQueue {
             default: return left.offset < right.offset
             }
         }.map(\.element)
+    }
+
+    static func keepersToSelect(in group: CleanupSuggestion, visibleAssetIDs: [String]) -> Set<String> {
+        let suggested = group.visibleSuggestedKeeperIDs.intersection(visibleAssetIDs)
+        return suggested.isEmpty ? Set(visibleAssetIDs.prefix(1)) : suggested
     }
 }
 
@@ -396,7 +555,9 @@ enum SuggestionCheckBudget {
 
 enum SuggestionScanPace {
     static func analysisLimit(isCharging: Bool) -> Int { isCharging ? .max : 48 }
-    static func resourceLimit(isCharging: Bool) -> Int { isCharging ? .max : 4 }
+    static func resourceLimit(isCharging: Bool) -> Int { isCharging ? 16 : 4 }
+    static let foregroundScoreLimit = 24
+    static let foregroundResourceLimit = 4
     static func itemDelay(isCharging: Bool) -> Duration {
         isCharging ? .zero : .milliseconds(300)
     }

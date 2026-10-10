@@ -15,7 +15,6 @@ struct ReviewSummaryView: View {
     @State private var deleteAfterPreviewDismissal: String?
     @State private var isCommitting = false
     @State private var showingError = false
-    @State private var showingUnavailableCleanupConfirmation = false
     @State private var showingAlbumConfirmation = false
     @State private var operationError: String?
     @State private var previewSelection: SummaryPreviewSelection?
@@ -28,10 +27,6 @@ struct ReviewSummaryView: View {
     private var deleteIDs: [String] {
         reviews.identifiers(with: .delete)
             .filter { library.asset(with: $0) != nil }
-    }
-
-    private var unavailableIDs: [String] {
-        reviews.unavailableIdentifiers(among: Set(library.assets.map(\.localIdentifier)))
     }
 
     private var albumItems: [PendingAlbumAssignment] {
@@ -53,8 +48,8 @@ struct ReviewSummaryView: View {
                     ProgressView(String(localized: "正在读取照片…"))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if favoriteIDs.isEmpty && deleteIDs.isEmpty && albumItems.isEmpty &&
-                            unavailableIDs.isEmpty && unavailableAlbumItems.isEmpty &&
-                            LivePhotoConversionManager.shared.pendingConversions.isEmpty &&
+                            unavailableAlbumItems.isEmpty &&
+                            LivePhotoConversionManager.shared.visiblePendingConversions(reviews: reviews).isEmpty &&
                             LivePhotoConversionManager.shared.journalError == nil {
                     ZeyingEmptyState(
                         symbol: "checklist",
@@ -113,18 +108,6 @@ struct ReviewSummaryView: View {
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
             Text(String(localized: "确认后，所选项目会加入对应的个人相簿。"))
-        }
-        .confirmationDialog(
-            String(localized: "清理不可访问的本地记录？"),
-            isPresented: $showingUnavailableCleanupConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button(String(localized: "只清理本地记录"), role: .destructive) {
-                Task { await cleanupUnavailableRecords() }
-            }
-            Button(String(localized: "取消"), role: .cancel) {}
-        } message: {
-            Text(String(localized: "只会删除择影保存的处理记录，不会修改系统照片。"))
         }
         .alert(String(localized: "操作未完成"), isPresented: $showingError) {
             Button(String(localized: "知道了")) { operationError = nil }
@@ -226,47 +209,6 @@ struct ReviewSummaryView: View {
                     }
                     .zeyingAlignedGroupedSectionHeader()
                     .textCase(nil)
-                } footer: {
-                    Text(String(localized: "选择相簿会视为保留。确认后才会写入系统照片相簿。"))
-                }
-            }
-
-            if !unavailableIDs.isEmpty {
-                Section {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(String(localized: "有 \(unavailableIDs.count) 项本地处理记录当前无法在照片图库中找到。"))
-                            .font(.subheadline.weight(.medium))
-                        Text(library.authorizationStatus != .authorized
-                             ? String(localized: "它们可能属于尚未授权给择影的照片。调整可访问范围后，记录可能重新出现。")
-                             : String(localized: "它们可能对应已被删除或移出当前图库的照片。"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        if library.authorizationStatus == .authorized {
-                            Button(String(localized: "清理本地记录")) {
-                                showingUnavailableCleanupConfirmation = true
-                            }
-                            .buttonStyle(ZeyingGlassButtonStyle(tint: .red))
-                        } else if library.authorizationStatus == .limited {
-                            Button(String(localized: "管理可访问照片")) {
-                                ZeyingLimitedLibraryAccess.present(using: library)
-                            }
-                            .buttonStyle(ZeyingGlassButtonStyle())
-                        } else {
-                            Button(String(localized: "管理照片访问权限")) {
-                                openPhotoSettings()
-                            }
-                            .buttonStyle(ZeyingGlassButtonStyle())
-                        }
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.clear)
-                } header: {
-                    Label(String(localized: "不可访问（\(unavailableIDs.count)）"), systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                        .zeyingAlignedGroupedSectionHeader()
-                } footer: {
-                    Text(String(localized: "这些记录会保留，直到你明确调整权限或清理本地记录。"))
                 }
             }
 
@@ -419,7 +361,11 @@ struct ReviewSummaryView: View {
                 HStack(spacing: 5) {
                     Image(systemName: isDeletion ? "trash" : "star")
                         .foregroundStyle(isDeletion ? .red : .orange)
-                    Text(isDeletion ? String(localized: "待删除") : String(localized: "待收藏"))
+                    Text(isDeletion
+                         ? (LivePhotoConversionManager.shared.conversion(for: asset.localIdentifier) == nil
+                            ? String(localized: "待删除")
+                            : String(localized: "原实况照片 · 待删除"))
+                         : String(localized: "待收藏"))
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption)
@@ -577,14 +523,36 @@ struct ReviewSummaryView: View {
         )
 
         do {
+            let conversions = LivePhotoConversionManager.shared
+            try conversions.verifyStagedOriginals(in: requestedIDs, reviews: reviews)
+            let conversionIDs = Set(requestedIDs.filter { conversions.conversion(for: $0) != nil })
             // PhotoLibraryService preserves the PhotoKit error so cancelling
             // the system confirmation leaves these local todos visible.
             let succeeded = try await library.delete(requestedIDs)
+            var cleanedIDs: [String] = []
+            var conversionErrors: [String] = []
+            for identifier in succeeded {
+                guard conversionIDs.contains(identifier) else {
+                    cleanedIDs.append(identifier)
+                    continue
+                }
+                do {
+                    try conversions.finishStagedOriginalDeletion(
+                        sourceIdentifier: identifier,
+                        reviews: reviews,
+                        albumAssignments: albumAssignments
+                    )
+                    cleanedIDs.append(identifier)
+                } catch {
+                    conversionErrors.append(error.localizedDescription)
+                }
+            }
             let statisticsSaved = reviews.recordCommittedDeletion(
-                succeeded.compactMap { statByIdentifier[$0] }
+                succeeded.filter { !conversionIDs.contains($0) }
+                    .compactMap { statByIdentifier[$0] }
             )
             let statisticsError = statisticsSaved ? nil : reviews.errorMessage
-            guard reviews.removeDeleted(succeeded) else {
+            guard reviews.removeDeleted(cleanedIDs) else {
                 operationError = [statisticsError, reviews.errorMessage]
                     .compactMap { $0 }
                     .joined(separator: "\n")
@@ -592,13 +560,14 @@ struct ReviewSummaryView: View {
                 showingError = true
                 return
             }
-            guard albumAssignments.removeApplied(succeeded) else {
+            guard albumAssignments.removeApplied(cleanedIDs) else {
                 operationError = albumAssignments.errorMessage ?? String(localized: "项目已删除，但相簿整理记录未能清除。")
                 showingError = true
                 return
             }
-            if let statisticsError {
-                operationError = statisticsError
+            let errors = ([statisticsError].compactMap { $0 } + conversionErrors)
+            if !errors.isEmpty {
+                operationError = errors.joined(separator: "\n")
                 showingError = true
             }
         } catch {
@@ -606,23 +575,6 @@ struct ReviewSummaryView: View {
                 ? String(localized: "已取消删除，待删除清单已保留。")
                 : PhotosFailureMessage.message(for: error)
             showingError = true
-        }
-    }
-
-    private func cleanupUnavailableRecords() async {
-        guard !unavailableIDs.isEmpty else { return }
-        isCommitting = true
-        defer { isCommitting = false }
-
-        guard reviews.removeDeleted(unavailableIDs) else {
-            operationError = reviews.errorMessage ?? String(localized: "无法清理本地处理记录。")
-            showingError = true
-            return
-        }
-        guard albumAssignments.removeApplied(unavailableIDs) else {
-            operationError = albumAssignments.errorMessage ?? String(localized: "无法清理相簿整理记录。")
-            showingError = true
-            return
         }
     }
 

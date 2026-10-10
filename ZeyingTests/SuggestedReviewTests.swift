@@ -19,6 +19,49 @@ struct SuggestedReviewTests {
         #expect(SuggestionReviewQueue.orderedAssetIDs(in: group) == ["b", "c", "a", "d", "e"])
     }
 
+    @Test("有人像建议的照片紧跟推荐保留项，网格和放大查看共用顺序")
+    func portraitSuggestionFollowsPrimaryKeeper() {
+        var group = CleanupSuggestion(
+            id: "portraits", kind: .similar, reason: .nearbyShots,
+            assetIDs: ["a", "b", "c"], recommendedKeepID: "a",
+            protectedIDs: [], knownBytes: nil, newestDate: nil
+        )
+        group.aestheticScores = ["a": 0.595, "b": 0.555, "c": 0.557]
+        #expect(SuggestionReviewQueue.orderedAssetIDs(in: group) == ["a", "c", "b"])
+
+        group.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+        group.portraitEvidence = [
+            "a": SuggestionPortraitEvidence(faceCount: 2, averageCaptureQuality: 0.495, largestFaceArea: 0.057),
+            "b": SuggestionPortraitEvidence(faceCount: 2, averageCaptureQuality: 0.511, largestFaceArea: 0.060),
+            "c": SuggestionPortraitEvidence(faceCount: 2, averageCaptureQuality: 0.480, largestFaceArea: 0.079)
+        ]
+        #expect(group.portraitReason(for: "b") != nil)
+        #expect(SuggestionReviewQueue.orderedAssetIDs(in: group) == ["a", "b", "c"])
+    }
+
+    @Test("一键帮选优先采用可见建议，没有建议时选择画面中的第一张")
+    func chooseKeepersUsesVisibleSuggestionOrFirstPhoto() {
+        var group = CleanupSuggestion(
+            id: "scene", kind: .similar, reason: .nearbyShots,
+            assetIDs: ["a", "b", "c"], recommendedKeepID: "b",
+            protectedIDs: [], knownBytes: nil, newestDate: nil
+        )
+        let visible = SuggestionReviewQueue.orderedAssetIDs(in: group)
+        #expect(SuggestionReviewQueue.keepersToSelect(in: group, visibleAssetIDs: visible) == ["b"])
+
+        group.suggestedKeeperIDs = ["b", "c"]
+        #expect(SuggestionReviewQueue.keepersToSelect(in: group, visibleAssetIDs: visible) == ["b", "c"])
+
+        group.recommendedKeepID = nil
+        group.suggestedKeeperIDs = nil
+        #expect(SuggestionReviewQueue.keepersToSelect(
+            in: group, visibleAssetIDs: SuggestionReviewQueue.orderedAssetIDs(in: group)) == ["a"])
+
+        group.recommendedKeepID = "missing"
+        #expect(SuggestionReviewQueue.keepersToSelect(in: group, visibleAssetIDs: ["c", "a"]) == ["c"])
+        #expect(SuggestionReviewQueue.keepersToSelect(in: group, visibleAssetIDs: []).isEmpty)
+    }
+
     @Test("推荐计数在英文中正确处理多个参数与单复数")
     func suggestionCountsUseEnglishPluralRules() throws {
         let path = try #require(Bundle.main.path(forResource: "en", ofType: "lproj"))
@@ -79,5 +122,97 @@ struct SuggestedReviewTests {
         #expect(reopened.resumeGroupIDs == ["group"])
         reopened.restoreSkipped()
         #expect(PhotoSuggestionService(defaults: defaults).skippedIDs.isEmpty)
+    }
+
+    @Test("人像建议比较面部质量，不把路人数量当作优势")
+    func portraitReasonsRequireComparativeEvidence() {
+        func portrait(faces: Int, quality: Float, area: Float, secondArea: Float = 0,
+                      x: Float = 0.5) -> SuggestionPortraitEvidence {
+            var evidence = SuggestionPortraitEvidence(faceCount: faces, averageCaptureQuality: quality,
+                                                      largestFaceArea: area)
+            evidence.dominantFaceQuality = quality
+            evidence.dominantCenterX = x
+            evidence.dominantCenterY = 0.5
+            evidence.secondLargestFaceArea = secondArea
+            return evidence
+        }
+        var group = CleanupSuggestion(id: "portrait", kind: .similar, reason: .nearbyShots,
+                                      assetIDs: ["a", "b"], recommendedKeepID: "a",
+                                      protectedIDs: [], knownBytes: nil, newestDate: nil)
+        group.portraitEvaluationComplete = true
+        group.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+        group.portraitEvidence = [
+            "a": portrait(faces: 2, quality: 0.80, area: 0.15, secondArea: 0.015),
+            "b": portrait(faces: 1, quality: 0.55, area: 0.14)
+        ]
+        #expect(group.portraitReason(for: "a") == String(localized: "人物面部成像质量更好"))
+        #expect(group.hasPortraitRecommendation)
+        #expect(group.portraitReason(for: "b") == nil)
+        group.portraitEvidence?["b"] = portrait(faces: 3, quality: 0.795, area: 0.14, secondArea: 0.07)
+        #expect(group.portraitReason(for: "a") == nil)
+        #expect(!group.hasPortraitRecommendation)
+        group.portraitEvidence?["b"] = portrait(faces: 1, quality: 0.55, area: 0.02)
+        #expect(group.portraitReason(for: "a") != nil)
+        group.portraitEvidence?["b"] = portrait(faces: 1, quality: 0.55, area: 0.005)
+        #expect(!group.hasPortraitRecommendation)
+    }
+
+    @Test("锁定保留的照片不阻止其他人像建议；面部质量缺失时可参考画面评分")
+    func portraitReasonsIncludeOtherPhotosInProtectedGroups() {
+        var group = CleanupSuggestion(id: "protected", kind: .similar, reason: .nearbyShots,
+                                      assetIDs: ["a", "b"], recommendedKeepID: "a",
+                                      protectedIDs: ["a"], knownBytes: nil, newestDate: nil)
+        group.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+        group.portraitEvaluationComplete = true
+        group.portraitEvidence = [
+            "a": SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: 0.52, largestFaceArea: 0.03),
+            "b": SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: 0.78, largestFaceArea: 0.03)
+        ]
+        #expect(group.portraitReason(for: "b") == String(localized: "人物面部成像质量更好"))
+        group.portraitEvidence = [
+            "a": SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: nil, largestFaceArea: 0.03),
+            "b": SuggestionPortraitEvidence(faceCount: 1, averageCaptureQuality: nil, largestFaceArea: 0.03)
+        ]
+        group.aestheticScores = ["a": 0.60, "b": 0.83]
+        #expect(group.portraitReason(for: "b") == String(localized: "人像画面整体观感更好"))
+    }
+
+    @Test("接近的清晰人像也给出如实的相对评分提示")
+    func closePortraitScoresStillProduceHelpfulHints() {
+        var group = CleanupSuggestion(id: "selfie", kind: .similar, reason: .nearbyShots,
+                                      assetIDs: ["a", "b", "c"], recommendedKeepID: "a",
+                                      protectedIDs: [], knownBytes: nil, newestDate: nil)
+        group.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
+        group.portraitEvaluationComplete = true
+        group.portraitEvidence = [
+            "a": SuggestionPortraitEvidence(faceCount: 2, averageCaptureQuality: 0.495, largestFaceArea: 0.057),
+            "b": SuggestionPortraitEvidence(faceCount: 2, averageCaptureQuality: 0.511, largestFaceArea: 0.060),
+            "c": SuggestionPortraitEvidence(faceCount: 2, averageCaptureQuality: 0.480, largestFaceArea: 0.079)
+        ]
+        group.aestheticScores = ["a": 0.595, "b": 0.555, "c": 0.557]
+        #expect(group.portraitReason(for: "a") == String(localized: "人像画面评分略高"))
+        #expect(group.portraitReason(for: "b") == String(localized: "面部成像评分略高"))
+        #expect(group.hasPortraitRecommendation)
+    }
+
+    @Test("顺序学习只保存汇总行为，撤销和重置生效")
+    func orderLearningPersistsAndCanReset() throws {
+        let suite = "suggestion-order-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let group = CleanupSuggestion(id: "group", kind: .similar, reason: .nearbyShots,
+                                      assetIDs: ["a", "b"], recommendedKeepID: nil,
+                                      protectedIDs: [], knownBytes: nil, newestDate: nil)
+        let service = PhotoSuggestionService(defaults: defaults)
+        service.recordReview(of: group, kept: 1)
+        #expect(service.orderLearning.score(for: .nearbyShots) > 0)
+        service.undoRecordedReview(of: group, kept: 1)
+        #expect(service.orderLearning.score(for: .nearbyShots) == 0)
+        service.skip(group)
+        service.skip(group)
+        let reopened = PhotoSuggestionService(defaults: defaults)
+        #expect(reopened.orderLearning.score(for: .nearbyShots) < 0)
+        reopened.resetOrderLearning()
+        #expect(PhotoSuggestionService(defaults: defaults).orderLearning.hasHistory == false)
     }
 }

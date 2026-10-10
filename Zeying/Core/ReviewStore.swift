@@ -172,14 +172,15 @@ final class ReviewStore {
     }
 
     /// A comparison group is one persisted transaction and one undo entry.
-    /// Existing keep decisions are protected even if the selection is stale.
+    /// A previous plain Keep can be changed by the group's explicit selection.
+    /// Pending favorites remain protected.
     @discardableResult
     func decideGroup(_ identifiers: [String], keeping: Set<String>) -> Bool {
         decideGroup(identifiers, keeping: keeping, allowsEmptyKeep: false)
     }
 
     /// Explicit "keep none" action. Photos are only staged for deletion and
-    /// existing keep decisions remain protected; the whole group is undoable.
+    /// pending favorites remain protected; the whole group is undoable.
     @discardableResult
     func stageGroupForDeletion(_ identifiers: [String]) -> Bool {
         decideGroup(identifiers, keeping: [], allowsEmptyKeep: true)
@@ -189,12 +190,15 @@ final class ReviewStore {
         let unique = Array(Set(identifiers)).sorted()
         guard !unique.isEmpty, (allowsEmptyKeep || !keeping.isEmpty), keeping.isSubset(of: Set(unique)),
               interactiveReviewCount == 0 else { return false }
-        let changes = unique.filter { records[$0]?.decision != .keep }
+        func desiredDecision(for identifier: String) -> ReviewDecision {
+            keeping.contains(identifier) || records[identifier]?.pendingFavorite == true ? .keep : .delete
+        }
+        let changes = unique.filter { records[$0]?.decision != desiredDecision(for: $0) }
             .map { UndoChange(assetIdentifier: $0, previous: snapshot(for: $0)) }
         guard !changes.isEmpty else { return false }
         for identifier in changes.map(\.assetIdentifier) {
             let before = snapshot(for: identifier)
-            let decision: ReviewDecision = keeping.contains(identifier) || before?.decision == .keep ? .keep : .delete
+            let decision = desiredDecision(for: identifier)
             assign(identifier, snapshot: Snapshot(decision: decision, pendingFavorite: decision == .keep && (before?.pendingFavorite ?? false)))
         }
         guard saveOrRollback() else { return false }

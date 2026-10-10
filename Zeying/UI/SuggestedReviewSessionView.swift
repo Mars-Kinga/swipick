@@ -16,8 +16,9 @@ struct SuggestedReviewSessionView: View {
     @State private var groups: [CleanupSuggestion]
     @State private var index: Int
     @State private var keeping = Set<String>()
+    @State private var didInitializeSelection = false
     @State private var groupDrafts: [String: Set<String>] = [:]
-    @State private var undoEntries: [(index: Int, token: UUID, wholeGroup: Bool)] = []
+    @State private var undoEntries: [(index: Int, token: UUID, wholeGroup: Bool, learnedKept: Int?)] = []
     @State private var startedUndoToken: UUID?
     @State private var gallery: SuggestionGallerySelection?
     @State private var showingError = false
@@ -40,11 +41,17 @@ struct SuggestedReviewSessionView: View {
     }
     private var protectedIDs: Set<String> {
         Set(currentAssets.filter {
-            $0.isFavorite || reviews.isPendingFavorite($0.localIdentifier) || reviews.decision(for: $0.localIdentifier) == .keep ||
+            $0.isFavorite || reviews.isPendingFavorite($0.localIdentifier) ||
             albumAssignments.assignment(for: $0.localIdentifier) != nil
         }.map(\.localIdentifier))
     }
     private var selectedIDs: Set<String> { keeping.union(protectedIDs).intersection(Set(currentAssets.map(\.localIdentifier))) }
+    private var canChooseKeepers: Bool {
+        guard let group else { return false }
+        return !currentAssets.isEmpty && currentAssets.count == group.assetIDs.count &&
+            suggestions.isCurrent(group, library: library) &&
+            !group.assetIDs.contains { reviews.decision(for: $0) == .delete || reviews.decision(for: $0) == .later }
+    }
     private var canCommit: Bool {
         guard let group else { return false }
         return !selectedIDs.isEmpty && currentAssets.count == group.assetIDs.count
@@ -57,6 +64,17 @@ struct SuggestedReviewSessionView: View {
     }
     private var canKeepNone: Bool { canKeepAll && protectedIDs.isEmpty }
     private var canUndo: Bool { undoEntries.last.map { reviews.latestUndoToken == $0.token } ?? false }
+    private var pendingConfirmationCount: Int {
+        let deletions = reviews.identifiers(with: .delete)
+            .filter { library.asset(with: $0) != nil }
+            .count
+        let favorites = reviews.pendingFavoriteIdentifiers
+            .filter { library.asset(with: $0) != nil }
+            .count
+        return deletions + favorites + albumAssignments.count +
+            LivePhotoConversionManager.shared.visiblePendingConversions(reviews: reviews).count +
+            (LivePhotoConversionManager.shared.journalError == nil ? 0 : 1)
+    }
     private var undoTitle: String {
         String(localized: undoEntries.last?.wholeGroup == false ? "撤销上一张" : "撤销整组决定")
     }
@@ -86,7 +104,14 @@ struct SuggestedReviewSessionView: View {
                     .toolbar { comparisonToolbar }
             }
         }
-        .onAppear { startedUndoToken = reviews.latestUndoToken; rememberSession() }
+        .onAppear {
+            if !didInitializeSelection, let group {
+                keeping = initialSelection(for: group)
+                didInitializeSelection = true
+            }
+            startedUndoToken = reviews.latestUndoToken
+            rememberSession()
+        }
         .onChange(of: suggestions.groups) { _, refreshed in
             let byID = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
             groups = groups.map { byID[$0.id] ?? $0 }
@@ -187,12 +212,20 @@ struct SuggestedReviewSessionView: View {
                         .accessibilityHint(String(localized: "本组照片会加入待删清单，确认后才从图库删除。"))
                     }
 
-                    Button { _ = commit(keeping: selectedIDs) } label: {
+                    Button {
+                        if selectedIDs.isEmpty {
+                            keeping.formUnion(SuggestionReviewQueue.keepersToSelect(
+                                in: group, visibleAssetIDs: currentAssets.map(\.localIdentifier)))
+                            haptic()
+                        } else {
+                            _ = commit(keeping: selectedIDs)
+                        }
+                    } label: {
                         Text(selectedIDs.isEmpty
-                             ? String(localized: "先选择要保留的照片")
+                             ? String(localized: "帮我选保留照片")
                              : String(localized: "保留 \(selectedIDs.count) 张，其余 \(currentAssets.count - selectedIDs.count) 张加入待删"))
                             .font(.headline)
-                            .foregroundStyle(canCommit ? Color(uiColor: .systemBackground) : Color.primary)
+                            .foregroundStyle(canCommit || canChooseKeepers ? Color(uiColor: .systemBackground) : Color.primary)
                             .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity)
@@ -201,24 +234,70 @@ struct SuggestedReviewSessionView: View {
                     .buttonStyle(.glassProminent)
                     .buttonBorderShape(.capsule)
                     .tint(.primary)
-                    .disabled(!canCommit)
+                    .disabled(selectedIDs.isEmpty ? !canChooseKeepers : !canCommit)
+                    .accessibilityHint(String(localized: selectedIDs.isEmpty
+                        ? "先帮你选中建议保留的照片；没有建议时选第一张。不会提交决定。"
+                        : "其余照片会进入清单，确认后才从图库删除。"))
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             }
         } else {
-            ContentUnavailableView {
-                Label(String(localized: "本轮建议已审核"), systemImage: "checkmark.circle")
-            } description: {
-                Text(String(localized: "待删照片已加入清单，确认后才会从系统图库删除。"))
-            } actions: {
-                Button(String(localized: "查看清单"), systemImage: "checklist") { openSummaryTab?() }
-                    .buttonStyle(.glassProminent)
-                    .tint(.primary)
-                    .foregroundStyle(Color(uiColor: .systemBackground))
-                Button(String(localized: "完成")) { dismiss() }
-            }
+            completedContent
         }
+    }
+
+    private var completedContent: some View {
+        VStack(spacing: 18) {
+            Spacer()
+
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 60, weight: .light))
+                .foregroundStyle(.green)
+
+            VStack(spacing: 7) {
+                Text(String(localized: "本轮建议已审核"))
+                    .font(.title2.weight(.semibold))
+
+                if pendingConfirmationCount > 0 {
+                    Text(String(localized: "还有 \(pendingConfirmationCount) 项待确认操作，可到清单确认。"))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+
+            VStack(spacing: 12) {
+                if pendingConfirmationCount > 0 {
+                    Button {
+                        if let openSummaryTab { openSummaryTab() } else { dismiss() }
+                    } label: {
+                        completedActionLabel(String(localized: "去清单确认"), symbol: "checklist")
+                    }
+                    .buttonStyle(ZeyingGlassButtonStyle())
+                }
+
+                Button {
+                    dismiss()
+                } label: {
+                    completedActionLabel(String(localized: "返回建议"), symbol: "arrow.uturn.backward")
+                }
+                .buttonStyle(ZeyingGlassButtonStyle())
+            }
+            .frame(maxWidth: 300)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(28)
+    }
+
+    private func completedActionLabel(_ title: String, symbol: String) -> some View {
+        Label(title, systemImage: symbol)
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .frame(maxWidth: .infinity, minHeight: 28)
     }
 
     @ToolbarContentBuilder
@@ -230,16 +309,9 @@ struct SuggestedReviewSessionView: View {
             }
         }
         ToolbarItem(placement: .topBarTrailing) {
-            if let group {
-                Menu {
-                    if group.recommendedKeepID != nil {
-                        Button(String(localized: "采用保留建议"), systemImage: "wand.and.stars") {
-                            if let id = group.recommendedKeepID { keeping = protectedIDs.union([id]); haptic() }
-                        }
-                    }
-                    Button(String(localized: "跳过本组"), systemImage: "forward.end") { skip() }
-                } label: { Image(systemName: "ellipsis") }
-                .accessibilityLabel(String(localized: "本组操作"))
+            if group != nil {
+                Button(String(localized: "跳过本组"), systemImage: "forward.end") { skip() }
+                    .labelStyle(.iconOnly)
             }
         }
     }
@@ -288,7 +360,13 @@ struct SuggestedReviewSessionView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if group.recommendedKeepID == id {
+            if id == group.recommendedKeepID && group.visibleSuggestedKeeperIDs.contains(id) {
+                Label(String(localized: "建议保留"), systemImage: "wand.and.stars")
+                    .font(.caption.weight(.semibold))
+            } else if let portraitReason = group.portraitReason(for: id) {
+                Label(portraitReason, systemImage: "person.crop.circle")
+                    .font(.caption.weight(.semibold))
+            } else if group.visibleSuggestedKeeperIDs.contains(id) {
                 Label(String(localized: "建议保留"), systemImage: "wand.and.stars")
                     .font(.caption.weight(.semibold))
             }
@@ -319,7 +397,9 @@ struct SuggestedReviewSessionView: View {
             ? protectedIDs.isEmpty && reviews.stageGroupForDeletion(group.assetIDs)
             : reviews.decideGroup(group.assetIDs, keeping: selected.union(protectedIDs))
         guard recorded else { showingError = true; return false }
-        if let token = reviews.latestUndoToken { undoEntries.append((index, token, true)) }
+        let keptCount = allowEmptyKeep ? 0 : selected.union(protectedIDs).count
+        if let token = reviews.latestUndoToken { undoEntries.append((index, token, true, keptCount)) }
+        suggestions.recordReview(of: group, kept: keptCount)
         haptic()
         advance()
         return true
@@ -334,7 +414,7 @@ struct SuggestedReviewSessionView: View {
     private func advance() {
         if let group { groupDrafts.removeValue(forKey: group.id) }
         index += 1
-        keeping = group.flatMap { groupDrafts[$0.id] } ?? []
+        keeping = self.group.map { initialSelection(for: $0) } ?? []
         startedUndoToken = reviews.latestUndoToken
         rememberSession()
     }
@@ -354,7 +434,7 @@ struct SuggestedReviewSessionView: View {
                 if let group { groupDrafts[group.id] = keeping }
                 withAnimation(.easeInOut(duration: 0.18)) {
                     index = target
-                    keeping = groupDrafts[candidate.id] ?? []
+                    keeping = initialSelection(for: candidate)
                 }
                 startedUndoToken = reviews.latestUndoToken
                 rememberSession()
@@ -367,23 +447,30 @@ struct SuggestedReviewSessionView: View {
 
     private func finishScreenshots() {
         if let token = reviews.latestUndoToken, token != startedUndoToken {
-            undoEntries.append((index, token, false))
+            undoEntries.append((index, token, false, nil))
         }
         advance()
     }
 
     private func undo() {
         guard let entry = undoEntries.last, reviews.undo(matching: entry.token) else { return }
+        if let kept = entry.learnedKept, groups.indices.contains(entry.index) {
+            suggestions.undoRecordedReview(of: groups[entry.index], kept: kept)
+        }
         index = entry.index
         undoEntries.removeLast()
-        keeping.removeAll()
+        keeping = group.map { initialSelection(for: $0) } ?? []
         startedUndoToken = reviews.latestUndoToken
         rememberSession()
         haptic()
     }
 
     private func rememberSession() { suggestions.rememberSession(groups, index: index) }
+    private func initialSelection(for group: CleanupSuggestion) -> Set<String> {
+        groupDrafts[group.id] ?? Set(group.assetIDs.filter { reviews.decision(for: $0) == .keep })
+    }
     private func haptic() { if settings.hapticsEnabled { UISelectionFeedbackGenerator().selectionChanged() } }
+
 }
 
 private struct SuggestionGallerySelection: Identifiable { let id: String }
@@ -396,6 +483,7 @@ private extension CleanupSuggestion {
     }
 
     func recommendationDetail(for assetID: String) -> String? {
+        if let portraitReason = portraitReason(for: assetID) { return portraitReason }
         guard recommendedKeepID == assetID, let recommendationBasis else { return nil }
         switch recommendationBasis {
         case .protected:
@@ -454,8 +542,12 @@ private struct SuggestionPhotoGallery: View {
     @State private var showingInfo = false
 
     private var recommendationReason: String? {
-        guard let recommendedKeepID = group.recommendedKeepID else { return nil }
-        return group.recommendationDetail(for: recommendedKeepID)
+        if let portraitReason = group.portraitReason(for: selectedID) { return portraitReason }
+        guard group.visibleSuggestedKeeperIDs.contains(selectedID) else { return nil }
+        if selectedID == group.recommendedKeepID {
+            return group.recommendationDetail(for: selectedID)
+        }
+        return String(localized: "同一场景的不同瞬间，可以一起保留。")
     }
 
     init(group: CleanupSuggestion, assetIDs: [String], initialID: String, library: PhotoLibraryService,
@@ -497,8 +589,6 @@ private struct SuggestionPhotoGallery: View {
                         Color.clear
                         if let recommendationReason {
                             recommendationCallout(recommendationReason)
-                                .opacity(selectedID == group.recommendedKeepID ? 1 : 0)
-                                .accessibilityHidden(selectedID != group.recommendedKeepID)
                         }
                     }
                     .frame(height: dynamicTypeSize.isAccessibilitySize ? nil : 100)
