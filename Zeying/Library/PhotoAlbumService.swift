@@ -63,6 +63,7 @@ final class PhotoAlbumService {
     @ObservationIgnored private var membershipGeneration = 0
     @ObservationIgnored private var membershipLibraryRevision: Int?
     @ObservationIgnored private var lastRefreshedLibraryRevision: Int?
+    @ObservationIgnored private var refreshGeneration = 0
     @ObservationIgnored private var newlyCreatedAlbumIdentifier: String? =
         UserDefaults.standard.string(forKey: PhotoAlbumService.newlyCreatedAlbumKey)
 
@@ -170,51 +171,53 @@ final class PhotoAlbumService {
     }
 
     func refresh() {
+        refreshGeneration += 1
         invalidateMemberships()
-        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard Self.canRead(status) else {
-            albums = []
-            frequentlyUsedFirst = []
-            revision += 1
+        albums = Self.fetchWritableAlbums()
+        frequentlyUsedFirst = orderByRecentUse()
+        revision += 1
+    }
+
+    func refreshIfNeeded(libraryRevision: Int) async {
+        guard lastRefreshedLibraryRevision != libraryRevision else { return }
+        lastRefreshedLibraryRevision = libraryRevision
+        refreshGeneration += 1
+        let generation = refreshGeneration
+        let options = await Task.detached(priority: .userInitiated) {
+            Self.fetchWritableAlbums()
+        }.value
+        guard generation == refreshGeneration else { return }
+        guard !Task.isCancelled else {
+            lastRefreshedLibraryRevision = nil
             return
         }
+        albums = options
+        frequentlyUsedFirst = orderByRecentUse()
+        revision += 1
+    }
 
+    private nonisolated static func fetchWritableAlbums() -> [PhotoAlbumOption] {
+        guard canRead(PHPhotoLibrary.authorizationStatus(for: .readWrite)) else { return [] }
         let result = PHAssetCollection.fetchAssetCollections(
-            with: .album,
-            subtype: .albumRegular,
-            options: nil
+            with: .album, subtype: .albumRegular, options: nil
         )
-
         var options: [PhotoAlbumOption] = []
         options.reserveCapacity(result.count)
         for index in 0..<result.count {
             let collection = result.object(at: index)
             let title = collection.localizedTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let title, !title.isEmpty else { continue }
-            guard collection.canPerform(.addContent) else { continue }
+            guard let title, !title.isEmpty, collection.canPerform(.addContent) else { continue }
             let estimatedCount = collection.estimatedAssetCount
-            options.append(
-                PhotoAlbumOption(
-                    id: collection.localIdentifier,
-                    title: title,
-                    count: estimatedCount == NSNotFound ? nil : Int(estimatedCount)
-                )
-            )
+            options.append(PhotoAlbumOption(
+                id: collection.localIdentifier,
+                title: title,
+                count: estimatedCount == NSNotFound ? nil : Int(estimatedCount)
+            ))
         }
-
-        albums = options.sorted {
+        return options.sorted {
             let ordering = $0.title.localizedStandardCompare($1.title)
-            if ordering == .orderedSame { return $0.id < $1.id }
-            return ordering == .orderedAscending
+            return ordering == .orderedSame ? $0.id < $1.id : ordering == .orderedAscending
         }
-        frequentlyUsedFirst = orderByRecentUse()
-        revision += 1
-    }
-
-    func refreshIfNeeded(libraryRevision: Int) {
-        guard lastRefreshedLibraryRevision != libraryRevision else { return }
-        refresh()
-        lastRefreshedLibraryRevision = libraryRevision
     }
 
     /// Create a real Photos album before asking whether to add the current asset.
@@ -535,7 +538,7 @@ final class PhotoAlbumService {
         }
     }
 
-    private static func canRead(_ status: PHAuthorizationStatus) -> Bool {
+    private nonisolated static func canRead(_ status: PHAuthorizationStatus) -> Bool {
         status == .authorized || status == .limited
     }
 

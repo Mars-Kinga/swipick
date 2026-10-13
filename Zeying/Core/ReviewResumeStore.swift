@@ -41,7 +41,8 @@ final class ReviewResumeStore {
     private static let monthKey = "com.mars.zeying.lastReviewMonth.v2"
     private static let scopeKey = "com.mars.zeying.lastReviewScope.v2"
     private static let queueKey = "com.mars.zeying.reviewQueue.v1"
-    private static let cursorKey = "com.mars.zeying.reviewQueueCursor.v1"
+    private static let recentQueuesKey = "com.mars.zeying.reviewQueues.v2"
+    private static let obsoleteCursorKey = "com.mars.zeying.reviewQueueCursor.v1"
     static let maximumSavedQueueCount = 20_000
 
     @ObservationIgnored private let defaults: UserDefaults
@@ -51,8 +52,7 @@ final class ReviewResumeStore {
     private var storedScope: StoredScope?
     private var legacyMonth: Date?
     private var legacyScope: LibraryScope?
-    @ObservationIgnored private var savedQueue: SavedQueue?
-    @ObservationIgnored private var savedCursor: QueueCursor?
+    @ObservationIgnored private var savedQueues: [SavedQueue] = []
     private(set) var errorMessage: String?
     private var calendar: Calendar { calendarOverride ?? .current }
 
@@ -75,8 +75,12 @@ final class ReviewResumeStore {
         legacyMonth = (defaults.object(forKey: Self.legacyMonthKey) as? TimeInterval)
             .map(Date.init(timeIntervalSince1970:))
         legacyScope = Self.decode(LibraryScope.self, key: Self.legacyScopeKey, defaults: defaults)
-        savedQueue = Self.decode(SavedQueue.self, key: Self.queueKey, defaults: defaults)
-        savedCursor = Self.decode(QueueCursor.self, key: Self.cursorKey, defaults: defaults)
+        if let recent = Self.decode([SavedQueue].self, key: Self.recentQueuesKey, defaults: defaults) {
+            savedQueues = Array(recent.prefix(2))
+        } else if let legacy = Self.decode(SavedQueue.self, key: Self.queueKey, defaults: defaults) {
+            savedQueues = [legacy]
+        }
+        defaults.removeObject(forKey: Self.obsoleteCursorKey)
     }
 
     func remember(scope: LibraryScope, containing date: Date?) {
@@ -100,7 +104,7 @@ final class ReviewResumeStore {
     }
 
     /// Call only when loading or changing an order, not on each card.
-    func rememberQueue(scope: LibraryScope, assetIDs: [String], position: Int, sortMode: ReviewQueueSortMode) {
+    func rememberQueue(scope: LibraryScope, assetIDs: [String], sortMode: ReviewQueueSortMode) {
         guard scope != .later else { return }
         var seen: Set<String> = []
         var uniqueIDs: [String] = []
@@ -124,30 +128,26 @@ final class ReviewResumeStore {
                 return
             }
         }
-        guard save(queue, key: Self.queueKey) else { return }
-        if let previous = savedQueue, previous.hasOverflow == true {
+        let recent = Array(([queue] + savedQueues.filter { $0.scope != queue.scope }).prefix(2))
+        guard save(recent, key: Self.recentQueuesKey) else {
+            if queue.hasOverflow == true { try? FileManager.default.removeItem(at: overflowURL(for: queue)) }
+            return
+        }
+        for previous in savedQueues where previous.hasOverflow == true && !recent.contains(where: { $0.id == previous.id }) {
             try? FileManager.default.removeItem(at: overflowURL(for: previous))
         }
-        savedQueue = queue
+        savedQueues = recent
+        defaults.removeObject(forKey: Self.queueKey)
         errorMessage = nil
-        let currentID = assetIDs.indices.contains(position) ? assetIDs[position] : nil
-        writeCursor(queue: queue, position: max(position, 0), currentAssetID: currentID)
         remember(scope: scope, containing: nil)
-    }
-
-    /// The identifier array is untouched; only a small cursor is written.
-    func updateQueuePosition(scope: LibraryScope, position: Int, currentAssetID: String?) {
-        guard scope != .later, let queue = savedQueue,
-              queue.scope == StoredScope(scope, calendar: calendar) else { return }
-        writeCursor(queue: queue, position: max(position, 0), currentAssetID: currentAssetID)
     }
 
     /// Keeps the saved order, filters inaccessible/reviewed IDs, then appends
     /// new items. Start at the first remaining item so an undone choice is
-    /// never skipped merely because it preceded the stored cursor.
+    /// never skipped merely because it preceded the previous on-screen position.
     func restoredQueue(scope: LibraryScope, availableAssetIDs: [String], reviewedAssetIDs: Set<String>) -> ReviewQueueResume? {
-        guard scope != .later, let queue = savedQueue,
-              queue.scope == StoredScope(scope, calendar: calendar) else { return nil }
+        guard scope != .later,
+              let queue = savedQueues.first(where: { $0.scope == StoredScope(scope, calendar: calendar) }) else { return nil }
         let available = Set(availableAssetIDs)
         var seen: Set<String> = []
         var identifiers: [String] = []
@@ -167,12 +167,6 @@ final class ReviewResumeStore {
             identifiers.append(identifier)
         }
         return ReviewQueueResume(assetIDs: identifiers, position: 0, sortMode: queue.sortMode)
-    }
-
-    private func writeCursor(queue: SavedQueue, position: Int, currentAssetID: String?) {
-        let cursor = QueueCursor(queueID: queue.id, position: position, currentAssetID: currentAssetID)
-        guard cursor != savedCursor, save(cursor, key: Self.cursorKey) else { return }
-        savedCursor = cursor
     }
 
     private func overflowURL(for queue: SavedQueue) -> URL {
@@ -226,10 +220,5 @@ final class ReviewResumeStore {
         let assetIDs: [String]
         let sortMode: ReviewQueueSortMode
         let hasOverflow: Bool?
-    }
-    private struct QueueCursor: Codable, Equatable {
-        let queueID: UUID
-        let position: Int
-        let currentAssetID: String?
     }
 }

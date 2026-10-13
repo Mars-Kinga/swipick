@@ -56,6 +56,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var reviewPreviewTasks: [String: Task<UIImage?, Never>] = [:]
     @ObservationIgnored private var reviewPreviewTokens: [String: UUID] = [:]
     @ObservationIgnored private var unavailableLocalReviewIDs: Set<String> = []
+    @ObservationIgnored private var cloudAssetIdentifiers: Set<String> = []
     @ObservationIgnored private var networkPreviewTasks: [String: Task<UIImage?, Never>] = [:]
     @ObservationIgnored private var networkPreviewTokens: [String: UUID] = [:]
     @ObservationIgnored private var localVideoItemTasks: [String: Task<AVPlayerItem?, Never>] = [:]
@@ -219,6 +220,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         reviewPreviewTokens.removeValue(forKey: identifier)
         networkPreviewTokens.removeValue(forKey: identifier)
         unavailableLocalReviewIDs.remove(identifier)
+        cloudAssetIdentifiers.remove(identifier)
     }
 
     /// Returns assets matching a library scope. `.later` is intentionally left
@@ -254,47 +256,132 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         ).firstObject
     }
 
-    /// Prepares the selected photo or video as a temporary file for the native
-    /// share sheet. This runs only after the user taps Share; iCloud data may
-    /// be downloaded as part of that explicit action.
-    func exportForSharing(_ asset: PHAsset) async throws -> URL {
-        let preferredTypes: [PHAssetResourceType] = asset.mediaType == .video
-            ? [.video, .fullSizeVideo]
-            : [.photo, .fullSizePhoto]
+    /// Prepares the selected photo or video for the native share sheet. This
+    /// runs only after the user taps Share; iCloud data may be downloaded as
+    /// part of that explicit action. A Live Photo is kept as one
+    /// `PHLivePhoto` item built from its matching still and paired-video
+    /// resources, rather than being presented as two unrelated attachments.
+    func exportForSharing(_ asset: PHAsset) async throws -> PhotoSharePayload {
         let resources = PHAssetResource.assetResources(for: asset)
-        guard let resource = preferredTypes.compactMap({ preferred in
-            resources.first(where: { $0.type == preferred })
-        }).first else {
-            throw PhotoLibraryServiceError.shareFailed(String(localized: "无法找到这张照片或视频的可分享文件。"))
-        }
-
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("ZeyingShare", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let fileExtension = resource.contentType.preferredFilenameExtension
-            ?? (asset.mediaType == .video ? "mov" : "jpg")
-        let fileURL = folder.appendingPathComponent("\(UUID().uuidString).\(fileExtension)")
+
+        var temporaryURLs: [URL] = []
+        do {
+            if asset.mediaSubtypes.contains(.photoLive) {
+                guard let pair = PhotoShareResourceSelection.livePhotoPair(in: resources) else {
+                    throw PhotoLibraryServiceError.shareFailed(
+                        String(localized: "无法找到与这张实况照片匹配的原始资源。")
+                    )
+                }
+                let stillURL = folder.appendingPathComponent(
+                    PhotoShareResourceSelection.safeFilename(
+                        for: pair.photo, fallbackExtension: "jpg"
+                    )
+                )
+                let pairedVideoURL = folder.appendingPathComponent(
+                    PhotoShareResourceSelection.safeFilename(
+                        for: pair.pairedVideo, fallbackExtension: "mov"
+                    )
+                )
+                temporaryURLs = [stillURL, pairedVideoURL]
+
+                try await streamShareResource(pair.photo, to: stillURL)
+                try await streamShareResource(pair.pairedVideo, to: pairedVideoURL)
+                let livePhoto = try await makeShareLivePhoto(
+                    stillURL: stillURL, pairedVideoURL: pairedVideoURL
+                )
+                return PhotoSharePayload(
+                    items: [.livePhoto(livePhoto)],
+                    temporaryURLs: temporaryURLs + [folder]
+                )
+            }
+
+            guard let resource = PhotoShareResourceSelection.preferredResource(
+                for: asset, in: resources
+            ) else {
+                throw PhotoLibraryServiceError.shareFailed(
+                    String(localized: "无法找到这张照片或视频的可分享文件。")
+                )
+            }
+
+            let fileURL = folder.appendingPathComponent(
+                PhotoShareResourceSelection.safeFilename(
+                    for: resource,
+                    fallbackExtension: asset.mediaType == .video ? "mov" : "jpg"
+                )
+            )
+            temporaryURLs = [fileURL]
+            try await streamShareResource(resource, to: fileURL)
+            return PhotoSharePayload(items: [.file(fileURL)], temporaryURLs: temporaryURLs + [folder])
+        } catch is CancellationError {
+            cleanupShareFiles(temporaryURLs + [folder])
+            throw CancellationError()
+        } catch let error as PhotoLibraryServiceError {
+            cleanupShareFiles(temporaryURLs + [folder])
+            throw error
+        } catch {
+            cleanupShareFiles(temporaryURLs + [folder])
+            throw PhotoLibraryServiceError.shareFailed(PhotosFailureMessage.message(for: error))
+        }
+    }
+
+    private func streamShareResource(_ resource: PHAssetResource, to fileURL: URL) async throws {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
+        let request = try ShareResourceDataRequest(fileURL: fileURL)
+        let manager = PHAssetResourceManager.default()
 
-        do {
+        try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                PHAssetResourceManager.default().writeData(
+                guard request.install(continuation) else { return }
+                let requestID = manager.requestData(
                     for: resource,
-                    toFile: fileURL,
-                    options: options
-                ) { error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume()
+                    options: options,
+                    dataReceivedHandler: { data in request.receive(data) },
+                    completionHandler: { error in request.finish(error: error) }
+                )
+                request.install(requestID: requestID, manager: manager)
+            }
+        } onCancel: {
+            request.cancel(using: manager)
+        }
+    }
+
+    private func makeShareLivePhoto(stillURL: URL, pairedVideoURL: URL) async throws -> PHLivePhoto {
+        let request = ShareLivePhotoRequest()
+        try Task.checkCancellation()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PHLivePhoto, Error>) in
+                guard request.install(continuation) else { return }
+                let requestID = PHLivePhoto.request(
+                    withResourceFileURLs: [stillURL, pairedVideoURL],
+                    placeholderImage: nil,
+                    targetSize: .zero,
+                    contentMode: .aspectFit
+                ) { livePhoto, info in
+                    let cancelled = (info[PHLivePhotoInfoCancelledKey] as? Bool) == true
+                    if cancelled {
+                        request.finish(error: CancellationError())
+                    } else if let error = info[PHLivePhotoInfoErrorKey] as? Error {
+                        request.finish(error: error)
+                    } else if (info[PHLivePhotoInfoIsDegradedKey] as? Bool) != true {
+                        if let livePhoto {
+                            request.finish(livePhoto: livePhoto)
+                        } else {
+                            request.finish(error: PhotoLibraryServiceError.shareFailed(
+                                String(localized: "无法读取这张实况照片的原始资源。")
+                            ))
+                        }
                     }
                 }
+                request.install(requestID: requestID)
             }
-            return fileURL
-        } catch {
-            try? FileManager.default.removeItem(at: fileURL)
-            throw PhotoLibraryServiceError.shareFailed(PhotosFailureMessage.message(for: error))
+        } onCancel: {
+            request.cancel()
         }
     }
 
@@ -312,7 +399,12 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         await PhotoImageLoader.load(identifier: asset.localIdentifier, targetSize: targetSize,
             allowNetwork: allowNetwork, contentMode: contentMode,
             deliveryMode: deliveryMode ?? (allowNetwork ? .highQualityFormat : .opportunistic),
-            timeout: allowNetwork ? nil : .seconds(5), onDegraded: onDegraded)
+            timeout: allowNetwork ? nil : .seconds(5), onDegraded: onDegraded,
+            onCloud: { [weak self] in self?.cloudAssetIdentifiers.insert(asset.localIdentifier) })
+    }
+
+    func isKnownCloudAsset(_ asset: PHAsset) -> Bool {
+        asset.mediaType == .image && cloudAssetIdentifiers.contains(asset.localIdentifier)
     }
 
     /// Keeps a few nearby cards ready without fetching iCloud originals.
@@ -369,7 +461,8 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         let budget = reviewPrefetchBudget
         let candidates = lastPrefetchCandidates
         let nextVideo = budget.videoCount > 0 ? candidates.prefix(2).first { $0.mediaType == .video } : nil
-        let neededReview = Set([currentIdentifier] + candidates.prefix(budget.highQualityCount).map(\.localIdentifier))
+        let neededReview = Set([currentIdentifier] + candidates.prefix(budget.highQualityCount).map(\.localIdentifier) +
+                               (budget.highQualityCount > 0 ? [nextVideo?.localIdentifier].compactMap { $0 } : []))
         let neededQuick = Set([currentIdentifier] + candidates.prefix(budget.quickCount).map(\.localIdentifier))
         let neededVideo = Set([currentIdentifier] + [nextVideo?.localIdentifier].compactMap { $0 })
         for id in reviewPreviewTasks.keys.filter({ !neededReview.contains($0) }) {
@@ -388,13 +481,19 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
             networkPreviewTokens.removeValue(forKey: id)
         }
         for asset in candidates.prefix(budget.quickCount)
-        where cachedQuickPreview(for: asset) == nil && cachedReviewPreview(for: asset) == nil {
+        where asset.mediaType != .video &&
+            cachedQuickPreview(for: asset) == nil && cachedReviewPreview(for: asset) == nil {
             _ = quickPreviewTask(for: asset)
         }
         for asset in candidates.prefix(budget.highQualityCount) where asset.mediaType != .video {
             if cachedReviewPreview(for: asset) == nil, !unavailableLocalReviewIDs.contains(asset.localIdentifier) {
                 _ = reviewPreviewTask(for: asset)
             }
+        }
+        if budget.highQualityCount > 0, let nextVideo,
+           cachedReviewPreview(for: nextVideo) == nil,
+           !unavailableLocalReviewIDs.contains(nextVideo.localIdentifier) {
+            _ = reviewPreviewTask(for: nextVideo)
         }
         if let nextVideo, localVideoItemTasks[nextVideo.localIdentifier] == nil {
             localVideoItemTasks[nextVideo.localIdentifier] = Task(priority: .utility) { [weak self] in
@@ -404,19 +503,21 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     func prepareUpcomingPreview(for asset: PHAsset) async -> UIImage? {
+        if asset.mediaType == .video {
+            return await prepareVideoPoster(for: asset)
+        }
         let quick = await quickPreview(for: asset)
         guard !Task.isCancelled else { return nil }
-        if reviewPrefetchBudget.highQualityCount > 0, asset.mediaType != .video {
+        if reviewPrefetchBudget.highQualityCount > 0 {
             return await prepareReviewPreview(for: asset) ?? quick
         }
         return quick
     }
 
     func prepareReviewPreview(for asset: PHAsset, allowNetwork: Bool = false) async -> UIImage? {
-        // A video needs only a poster while PhotoKit prepares its player item.
-        // Waiting for a separate high-quality still can delay the whole review
-        // queue and compete with video startup for decoding resources.
-        if asset.mediaType == .video { return await quickPreview(for: asset) }
+        // Video playback and the clear poster prepare independently. Do not
+        // make opening the review queue wait for a video still request.
+        if asset.mediaType == .video { return cachedReviewPreview(for: asset) }
         if let cached = cachedReviewPreview(for: asset) { return cached }
         if !unavailableLocalReviewIDs.contains(asset.localIdentifier),
            let localImage = await reviewPreviewTask(for: asset).value { return localImage }
@@ -429,6 +530,15 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         )
         if let image, !Task.isCancelled { cacheReviewPreview(image, for: asset) }
         return image
+    }
+
+    /// A video poster is displayed only after PhotoKit has delivered its
+    /// full-quality local rendition. The player can start in parallel.
+    func prepareVideoPoster(for asset: PHAsset) async -> UIImage? {
+        guard asset.mediaType == .video else { return nil }
+        if let cached = cachedReviewPreview(for: asset) { return cached }
+        guard !unavailableLocalReviewIDs.contains(asset.localIdentifier) else { return nil }
+        return await reviewPreviewTask(for: asset).value
     }
 
     private func reviewPreviewTask(for asset: PHAsset) -> Task<UIImage?, Never> {
@@ -669,6 +779,15 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         return await requestPlayerItemDirect(for: asset, allowNetwork: allowNetwork)
     }
 
+    func requestVideoPreview(for asset: PHAsset, allowNetwork: Bool = false) async -> VideoPreviewResult {
+        guard !Task.isCancelled else { return VideoPreviewResult(item: nil, needsDownload: false) }
+        if !allowNetwork, let prefetched = localVideoItemTasks.removeValue(forKey: asset.localIdentifier) {
+            let item = await withTaskCancellationHandler { await prefetched.value } onCancel: { prefetched.cancel() }
+            if let item { return VideoPreviewResult(item: item, needsDownload: false) }
+        }
+        return await VideoPreviewLoader.loadResult(identifier: asset.localIdentifier, allowNetwork: allowNetwork)
+    }
+
     private func requestPlayerItemDirect(for asset: PHAsset, allowNetwork: Bool) async -> AVPlayerItem? {
         // PhotoKit may synchronously prepare video metadata before returning
         // a request ID. Keep that work away from the review buttons and swipes.
@@ -829,6 +948,7 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
         quickPreviewCache.removeAllObjects()
         reviewPreviewCache.removeAllObjects()
         unavailableLocalReviewIDs.removeAll()
+        cloudAssetIdentifiers.removeAll()
         assets.removeAll(keepingCapacity: true)
         assetsByIdentifier.removeAll(keepingCapacity: true)
         albums.removeAll(keepingCapacity: true)
@@ -841,24 +961,306 @@ final class PhotoLibraryService: NSObject, PHPhotoLibraryChangeObserver {
     }
 }
 
+struct PhotoSharePayload: Identifiable {
+    let id = UUID()
+    let items: [PhotoShareItem]
+    let temporaryURLs: [URL]
+
+    func cleanup() {
+        cleanupShareFiles(temporaryURLs)
+    }
+}
+
+enum PhotoShareItem {
+    case file(URL)
+    case livePhoto(PHLivePhoto)
+}
+
+enum PhotoShareResourceSelection {
+    private static let livePhotoPairs: [(PHAssetResourceType, PHAssetResourceType)] = [
+        (.photo, .pairedVideo),
+        (.fullSizePhoto, .fullSizePairedVideo),
+        (.adjustmentBasePhoto, .adjustmentBasePairedVideo),
+    ]
+
+    static func livePhotoPair(
+        in resources: [PHAssetResource]
+    ) -> (photo: PHAssetResource, pairedVideo: PHAssetResource)? {
+        let availableTypes = Set(resources.map(\.type))
+        guard let pair = livePhotoPairTypes(availableTypes: availableTypes) else {
+            return nil
+        }
+        return matchingResources(resources, photoType: pair.photo, videoType: pair.pairedVideo)
+    }
+
+    static func livePhotoPairTypes(
+        availableTypes: Set<PHAssetResourceType>
+    ) -> (photo: PHAssetResourceType, pairedVideo: PHAssetResourceType)? {
+        for (photoType, videoType) in livePhotoPairs {
+            guard availableTypes.contains(photoType), availableTypes.contains(videoType) else {
+                continue
+            }
+            return (photoType, videoType)
+        }
+        return nil
+    }
+
+    private static func matchingResources(
+        _ resources: [PHAssetResource],
+        photoType: PHAssetResourceType,
+        videoType: PHAssetResourceType
+    ) -> (photo: PHAssetResource, pairedVideo: PHAssetResource)? {
+        guard let photo = resources.first(where: { $0.type == photoType }),
+              let pairedVideo = resources.first(where: { $0.type == videoType }) else {
+            return nil
+        }
+        return (photo, pairedVideo)
+    }
+
+    static func preferredResource(
+        for asset: PHAsset,
+        in resources: [PHAssetResource]
+    ) -> PHAssetResource? {
+        let preferredTypes: [PHAssetResourceType] = asset.mediaType == .video
+            ? [.video, .fullSizeVideo]
+            : [.photo, .fullSizePhoto]
+        return preferredTypes.compactMap { preferred in
+            resources.first(where: { $0.type == preferred })
+        }.first
+    }
+
+    static func safeFilename(for resource: PHAssetResource, fallbackExtension: String) -> String {
+        let resourceFilename: String
+        if #available(iOS 27.0, *) {
+            resourceFilename = resource.filename ?? resource.originalFilename
+        } else {
+            resourceFilename = resource.originalFilename
+        }
+        let original = URL(fileURLWithPath: resourceFilename).lastPathComponent
+        guard !original.isEmpty, original != "." else {
+            let extensionName = resource.contentType.preferredFilenameExtension ?? fallbackExtension
+            return "\(UUID().uuidString).\(extensionName)"
+        }
+        return original
+    }
+}
+
+private func cleanupShareFiles(_ urls: [URL]) {
+    // Export callers append the containing folder after its files. Remove
+    // files first so the folder can be removed as well.
+    for url in urls {
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
+final class ShareResourceDataRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private let fileURL: URL
+    private let fileHandle: FileHandle
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var requestID: PHAssetResourceDataRequestID?
+    private var manager: PHAssetResourceManager?
+    private var isFinished = false
+
+    init(fileURL: URL) throws {
+        self.fileURL = fileURL
+        guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        do {
+            fileHandle = try FileHandle(forWritingTo: fileURL)
+        } catch {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw error
+        }
+    }
+
+    func install(_ continuation: CheckedContinuation<Void, Error>) -> Bool {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func install(requestID: PHAssetResourceDataRequestID, manager: PHAssetResourceManager) {
+        lock.lock()
+        self.requestID = requestID
+        self.manager = manager
+        let shouldCancel = isFinished
+        lock.unlock()
+        if shouldCancel {
+            manager.cancelDataRequest(requestID)
+        }
+    }
+
+    func receive(_ data: Data) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        do {
+            try fileHandle.write(contentsOf: data)
+            lock.unlock()
+        } catch {
+            lock.unlock()
+            finish(error: error)
+        }
+    }
+
+    func finish(error: Error?) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        let requestID = self.requestID
+        let manager = self.manager
+        lock.unlock()
+
+        try? fileHandle.close()
+        if let error {
+            if let requestID {
+                manager?.cancelDataRequest(requestID)
+            }
+            try? FileManager.default.removeItem(at: fileURL)
+            continuation?.resume(throwing: error)
+        } else {
+            continuation?.resume()
+        }
+    }
+
+    func cancel(using manager: PHAssetResourceManager) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let requestID = self.requestID
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+
+        if let requestID {
+            manager.cancelDataRequest(requestID)
+        }
+        try? fileHandle.close()
+        try? FileManager.default.removeItem(at: fileURL)
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
+private final class ShareLivePhotoRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<PHLivePhoto, Error>?
+    private var requestID: PHLivePhotoRequestID?
+    private var isFinished = false
+
+    func install(_ continuation: CheckedContinuation<PHLivePhoto, Error>) -> Bool {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func install(requestID: PHLivePhotoRequestID) {
+        lock.lock()
+        self.requestID = requestID
+        let shouldCancel = isFinished
+        lock.unlock()
+        if shouldCancel {
+            PHLivePhoto.cancelRequest(withRequestID: requestID)
+        }
+    }
+
+    func finish(livePhoto: PHLivePhoto) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: livePhoto)
+    }
+
+    func finish(error: Error) {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: error)
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return
+        }
+        isFinished = true
+        let requestID = self.requestID
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+
+        if let requestID {
+            PHLivePhoto.cancelRequest(withRequestID: requestID)
+        }
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
+struct VideoPreviewResult {
+    let item: AVPlayerItem?
+    let needsDownload: Bool
+}
+
 private enum VideoPreviewLoader {
     @concurrent
     static func load(identifier: String, allowNetwork: Bool) async -> AVPlayerItem? {
+        await loadResult(identifier: identifier, allowNetwork: allowNetwork).item
+    }
+
+    @concurrent
+    static func loadResult(identifier: String, allowNetwork: Bool) async -> VideoPreviewResult {
+        let unavailable = VideoPreviewResult(item: nil, needsDownload: false)
         guard !Task.isCancelled,
               let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject,
-              !Task.isCancelled else { return nil }
+              !Task.isCancelled else { return unavailable }
         let options = PHVideoRequestOptions()
         options.deliveryMode = .automatic
         options.version = .current
         options.isNetworkAccessAllowed = allowNetwork
         let manager = PHImageManager.default()
-        let request = OneShotContinuation<AVPlayerItem?>(cancellationValue: nil)
+        let request = OneShotContinuation<VideoPreviewResult>(cancellationValue: unavailable)
         // Local autoplay is opportunistic. A slow original should leave a
         // poster and a manual play button instead of an indefinite spinner.
         let timeout: Task<Void, Never>? = allowNetwork ? nil : Task {
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
-            request.finishEarly(returning: nil, using: manager)
+            request.finishEarly(returning: unavailable, using: manager)
         }
         defer { timeout?.cancel() }
         return await withTaskCancellationHandler {
@@ -866,7 +1268,11 @@ private enum VideoPreviewLoader {
                 guard request.install(continuation) else { return }
                 let requestID = manager.requestPlayerItem(forVideo: asset, options: options) { item, info in
                     let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
-                    request.resume(returning: cancelled || info?[PHImageErrorKey] != nil ? nil : item)
+                    request.resume(returning: VideoPreviewResult(
+                        item: cancelled || info?[PHImageErrorKey] != nil ? nil : item,
+                        needsDownload: !cancelled && !allowNetwork && item == nil &&
+                            (info?[PHImageResultIsInCloudKey] as? Bool) == true
+                    ))
                 }
                 request.install(requestID: requestID, manager: manager)
             }

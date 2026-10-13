@@ -91,7 +91,7 @@ struct AlbumPickerSheet: View {
                 }
             }
             .task {
-                albumService.refreshIfNeeded(libraryRevision: libraryRevision)
+                await albumService.refreshIfNeeded(libraryRevision: libraryRevision)
             }
         }
         .presentationDetents([.medium, .large])

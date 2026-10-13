@@ -96,6 +96,33 @@ struct ReviewStoreTests {
         #expect(reopened.assignment(for: "static-copy")?.albumIdentifier == "album-id-2")
     }
 
+    @Test("取消单张或全部待加入相簿不会清除照片的保留决定")
+    func pendingAlbumAdditionsCanBeCancelledWithoutChangingKeep() throws {
+        let container = try ModelContainer(
+            for: ReviewRecord.self, PendingAlbumAssignment.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let reviews = ReviewStore(context: container.mainContext)
+        let albums = PendingAlbumAssignmentStore(context: container.mainContext)
+
+        for identifier in ["photo-A", "photo-B"] {
+            #expect(reviews.decide(.keep, for: identifier))
+            #expect(albums.assign(assetIdentifier: identifier, albumIdentifier: "album", albumTitle: "旅行"))
+        }
+        #expect(albums.removeApplied(["photo-A"]))
+        #expect(albums.assignment(for: "photo-A") == nil)
+        #expect(albums.assignment(for: "photo-B") != nil)
+        #expect(reviews.decision(for: "photo-A") == .keep)
+
+        #expect(albums.removeApplied(albums.assignments.map(\.assetIdentifier)))
+        #expect(albums.count == 0)
+        let reopenedReviews = ReviewStore(context: container.mainContext)
+        let reopenedAlbums = PendingAlbumAssignmentStore(context: container.mainContext)
+        #expect(reopenedReviews.decision(for: "photo-A") == .keep)
+        #expect(reopenedReviews.decision(for: "photo-B") == .keep)
+        #expect(reopenedAlbums.count == 0)
+    }
+
     @Test("新相簿创建后记录标识供失败重试使用")
     func createdAlbumIdentifierSurvivesRetry() throws {
         let container = try ModelContainer(
@@ -265,6 +292,32 @@ struct ReviewStoreTests {
         #expect(store.undo())
         #expect(store.decision(for: "photo-A") == .keep)
         #expect(store.isPendingFavorite("photo-A"))
+    }
+
+    @Test("取消单张或全部待收藏只保留照片，不修改其他决定")
+    func pendingFavoritesCanBeCancelledWithoutChangingKeep() throws {
+        let container = try ModelContainer(
+            for: ReviewRecord.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let store = ReviewStore(context: container.mainContext)
+
+        #expect(store.stageFavorite(for: "photo-A", alreadyFavorite: false))
+        #expect(store.stageFavorite(for: "photo-B", alreadyFavorite: false))
+        #expect(store.decide(.delete, for: "photo-C"))
+        #expect(store.cancelPendingFavorites(["photo-A"]))
+        #expect(store.pendingFavoriteIdentifiers == ["photo-B"])
+        #expect(store.decision(for: "photo-A") == .keep)
+
+        #expect(store.cancelPendingFavorites(store.pendingFavoriteIdentifiers))
+        #expect(store.pendingFavoriteIdentifiers.isEmpty)
+        #expect(store.decision(for: "photo-B") == .keep)
+        #expect(store.decision(for: "photo-C") == .delete)
+
+        let reopened = ReviewStore(context: container.mainContext)
+        #expect(reopened.decision(for: "photo-A") == .keep)
+        #expect(reopened.decision(for: "photo-B") == .keep)
+        #expect(reopened.pendingFavoriteIdentifiers.isEmpty)
     }
 
     @Test("系统提交成功后只清理对应待办")

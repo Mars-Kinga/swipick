@@ -10,10 +10,12 @@ import Vision
 final class PhotoSuggestionService {
     private(set) var groups: [CleanupSuggestion] = []
     private(set) var isScanning = false
+    private(set) var isClearingAnalysisData = false
     private(set) var hasScanned = false
-    private(set) var checkedCount = 0
-    private(set) var totalCount = 0
-    private(set) var unavailableCount = 0
+    @ObservationIgnored private(set) var checkedCount = 0
+    @ObservationIgnored private(set) var totalCount = 0
+    @ObservationIgnored private(set) var unavailableCount = 0
+    private(set) var displayedProgress = SuggestionScanProgress(checked: 0, total: 0, unavailable: 0)
     private(set) var isVerifyingCopies = false
     private(set) var lastScanDate: Date?
     private(set) var lastBackgroundRunDate: Date?
@@ -22,6 +24,7 @@ final class PhotoSuggestionService {
     private(set) var isManuallyPaused = false
     private(set) var isEnergyPaused = false
     private(set) var skippedIDs: Set<String>
+    private(set) var reviewedGroupIDs: Set<String>
     private(set) var resumeGroupIDs: [String]
     private(set) var orderLearning: SuggestionOrderLearning
 
@@ -30,6 +33,12 @@ final class PhotoSuggestionService {
     @ObservationIgnored private let interactionGate = SuggestionInteractionGate()
     @ObservationIgnored private let snapshotWriter: SuggestionGroupSnapshotWriter
     @ObservationIgnored private var snapshotRevision = 0
+    @ObservationIgnored private var savedProgressStep = 0
+    @ObservationIgnored private var progressDisplayPolicy = SuggestionProgressDisplayPolicy()
+    @ObservationIgnored private var progressVisible = false
+    @ObservationIgnored private var progressVisibilityRequested = false
+    @ObservationIgnored private var progressVisibilityRevision = 0
+    @ObservationIgnored private var progressVisibilityTask: Task<Void, Never>?
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var energyResumeTask: Task<Void, Never>?
     @ObservationIgnored private var foregroundActive = true
@@ -45,6 +54,7 @@ final class PhotoSuggestionService {
     /// accessible and has no ReviewStore decision yet.
     @ObservationIgnored private var albumAssignments: PendingAlbumAssignmentStore?
     private static let skippedKey = "com.mars.zeying.skippedSuggestions.v1"
+    private static let reviewedKey = "com.mars.zeying.reviewedSuggestions.v1"
     private static let resumeKey = "com.mars.zeying.suggestionSession.v1"
     private static let orderLearningKey = "com.mars.zeying.suggestionOrderLearning.v1"
     private static let manualPauseKey = "com.mars.zeying.suggestionManualPause.v1"
@@ -70,12 +80,16 @@ final class PhotoSuggestionService {
             checkedCount = snapshot.progress?.checked ?? 0
             totalCount = snapshot.progress?.total ?? 0
             unavailableCount = snapshot.progress?.unavailable ?? 0
+            let restoredProgress = snapshot.progress ?? SuggestionScanProgress(checked: 0, total: 0, unavailable: 0)
+            displayedProgress = restoredProgress
+            savedProgressStep = (restoredProgress.percentage(complete: false) ?? 0) / 5
         }
         lastBackgroundRunDate = defaults.object(forKey: Self.lastBackgroundRunKey) as? Date
         if defaults.object(forKey: Self.backgroundEnabledKey) == nil {
             defaults.set(true, forKey: Self.backgroundEnabledKey)
         }
         skippedIDs = Set(defaults.stringArray(forKey: Self.skippedKey) ?? [])
+        reviewedGroupIDs = Set(defaults.stringArray(forKey: Self.reviewedKey) ?? [])
         resumeGroupIDs = defaults.stringArray(forKey: Self.resumeKey) ?? []
         orderLearning = defaults.data(forKey: Self.orderLearningKey)
             .flatMap { try? JSONDecoder().decode(SuggestionOrderLearning.self, from: $0) } ?? SuggestionOrderLearning()
@@ -97,6 +111,7 @@ final class PhotoSuggestionService {
     func availableGroups(library: PhotoLibraryService, reviews: ReviewStore, includeSkipped: Bool = false) -> [CleanupSuggestion] {
         groups.filter { group in
             (includeSkipped || !skippedIDs.contains(group.id)) &&
+            !isReviewedGroup(group, reviews: reviews) &&
             isCurrent(group, library: library) &&
             group.assetIDs.contains {
                 group.kind == .screenshots
@@ -109,6 +124,13 @@ final class PhotoSuggestionService {
             } &&
             (group.kind == .screenshots || !group.assetIDs.contains { reviews.decision(for: $0) == .delete || reviews.decision(for: $0) == .later })
         }
+    }
+
+    /// A completed comparison stays hidden while its Keep decisions remain in
+    /// place. If those decisions are undone elsewhere, it becomes available again.
+    func isReviewedGroup(_ group: CleanupSuggestion, reviews: ReviewStore) -> Bool {
+        reviewedGroupIDs.contains(group.id) &&
+            group.assetIDs.allSatisfy { reviews.decision(for: $0) == .keep }
     }
 
     /// A Keep decision is a reversible review choice, not a lock. Only
@@ -170,7 +192,7 @@ final class PhotoSuggestionService {
     }
 
     func startIfNeeded(library: PhotoLibraryService, reviews: ReviewStore) {
-        guard foregroundActive, !isManuallyPaused else { return }
+        guard foregroundActive, !isManuallyPaused, !isClearingAnalysisData else { return }
         if SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                              thermalState: ProcessInfo.processInfo.thermalState,
                                              background: false, isCharging: isCharging) {
@@ -220,9 +242,37 @@ final class PhotoSuggestionService {
 
     func setForegroundActive(_ active: Bool) {
         foregroundActive = active
+        updateProgressVisibility(progressVisibilityRequested && active)
         if !active {
             energyResumeTask?.cancel()
             energyResumeTask = nil
+        }
+    }
+
+    /// Live counts belong to the visible status row. Hidden tabs and a locked
+    /// device do not publish periodic UI updates or start a polling timer.
+    func setProgressVisible(_ visible: Bool) {
+        progressVisibilityRequested = visible
+        updateProgressVisibility(visible && foregroundActive)
+    }
+
+    private func updateProgressVisibility(_ visible: Bool) {
+        guard progressVisible != visible else { return }
+        progressVisible = visible
+        progressVisibilityRevision &+= 1
+        let visibilityRevision = progressVisibilityRevision
+        progressVisibilityTask?.cancel()
+        publishDisplayedProgress(force: visible)
+        let currentGeneration = generation
+        let gate = interactionGate
+        let analyzer = analyzer
+        progressVisibilityTask = Task { [weak self] in
+            await gate.setProgressReportingEnabled(visible, revision: visibilityRevision)
+            guard visible, !Task.isCancelled else { return }
+            let latest = await analyzer.currentProgress(for: currentGeneration)
+            guard !Task.isCancelled, let self, progressVisible,
+                  generation == currentGeneration, let latest else { return }
+            receiveLiveProgress(latest, generation: currentGeneration, forceDisplay: true)
         }
     }
 
@@ -284,6 +334,7 @@ final class PhotoSuggestionService {
     }
 
     func start(library: PhotoLibraryService, reviews: ReviewStore, background: Bool = false) {
+        guard !isClearingAnalysisData else { return }
         pause()
         priorityAttemptedGroupIDs.removeAll()
         isManuallyPaused = false
@@ -321,11 +372,16 @@ final class PhotoSuggestionService {
                 if index.isMultiple(of: 32) { await Task.yield() }
             }
             guard !Task.isCancelled, generation == currentGeneration else { return }
-            totalCount = descriptors.count
+            let scanDate = Date.now
+            totalCount = SuggestionScanOrder.candidateCount(in: descriptors, now: scanDate)
             checkedCount = min(checkedCount, totalCount)
+            publishDisplayedProgress(force: true)
             saveGroupSnapshot()
             await analyzer.scan(descriptors, background: background, isCharging: charging,
-                                interactionGate: interactionGate) { update in
+                                generation: currentGeneration, now: scanDate,
+                                interactionGate: interactionGate, liveProgress: { progress in
+                await self.receiveLiveProgress(progress, generation: currentGeneration)
+            }) { update in
                 await self.receive(update, generation: currentGeneration)
             }
         }
@@ -345,13 +401,70 @@ final class PhotoSuggestionService {
         scanTask = nil
         isScanning = false
         isVerifyingCopies = false
+        publishDisplayedProgress(force: true)
+    }
+
+    /// Stop all scan writes before removing regenerable analysis data. Keep
+    /// user review decisions, skipped groups, and ordering preferences intact.
+    func clearAnalysisData() async throws {
+        guard !isClearingAnalysisData else { return }
+        isClearingAnalysisData = true
+        defer { isClearingAnalysisData = false }
+
+        let activeScan = scanTask
+        pause()
+        await activeScan?.value
+        try await analyzer.clearCache()
+
+        snapshotRevision &+= 1
+        try await snapshotWriter.clear(revision: snapshotRevision)
+        groups = []
+        hasScanned = false
+        checkedCount = 0
+        totalCount = 0
+        unavailableCount = 0
+        displayedProgress = SuggestionScanProgress(checked: 0, total: 0, unavailable: 0)
+        progressDisplayPolicy = SuggestionProgressDisplayPolicy()
+        savedProgressStep = 0
+        lastScanDate = nil
+        isEnergyPaused = false
+        errorMessage = nil
+        libraryRevision = nil
+        scanningAssetIDs = []
+        priorityAttemptedGroupIDs.removeAll()
+        currentGroupCache.removeAll()
+        currentGroupCacheRevision = nil
+        currentGroupCacheLibrary = nil
+        // Leave automatic analysis off so the cleared data does not immediately
+        // grow back. The existing switch can start a fresh analysis later.
+        pause(manually: true)
     }
 
     var backgroundCheckingEnabled: Bool { defaults.bool(forKey: Self.backgroundEnabledKey) && !isManuallyPaused }
 
     var scanProgressPercent: Int? {
+        scanProgress.percentage(complete: hasScanned)
+    }
+
+    private var scanProgress: SuggestionScanProgress {
         SuggestionScanProgress(checked: checkedCount, total: totalCount, unavailable: unavailableCount)
-            .percentage(complete: hasScanned)
+    }
+
+    private func publishDisplayedProgress(force: Bool = false) {
+        if let progress = progressDisplayPolicy.update(scanProgress, visible: progressVisible,
+                                                       at: ContinuousClock.now, force: force) {
+            displayedProgress = progress
+        }
+    }
+
+    private func receiveLiveProgress(_ progress: SuggestionScanProgress, generation: UUID,
+                                     forceDisplay: Bool = false) {
+        guard self.generation == generation else { return }
+        checkedCount = progress.checked
+        totalCount = progress.total
+        unavailableCount = progress.unavailable
+        publishDisplayedProgress(force: forceDisplay)
+        // Display-only updates never regroup, load thumbnails or write files.
     }
 
     func scheduleBackgroundCheck(after delay: TimeInterval = 15 * 60) {
@@ -379,7 +492,7 @@ final class PhotoSuggestionService {
 
     func runBackgroundCheck(library: PhotoLibraryService, reviews: ReviewStore) async -> Bool {
         let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard backgroundCheckingEnabled, status == .authorized || status == .limited,
+        guard !isClearingAnalysisData, backgroundCheckingEnabled, status == .authorized || status == .limited,
               !SuggestionCheckBudget.shouldPause(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
                                                  thermalState: ProcessInfo.processInfo.thermalState,
                                                  isCharging: isCharging) else { return false }
@@ -414,11 +527,17 @@ final class PhotoSuggestionService {
     }
 
     func recordReview(of group: CleanupSuggestion, kept: Int) {
+        if reviewedGroupIDs.insert(group.id).inserted {
+            defaults.set(reviewedGroupIDs.sorted(), forKey: Self.reviewedKey)
+        }
         orderLearning.recordCompletion(reason: group.reason, kept: kept, total: group.assetIDs.count)
         saveOrderLearning()
     }
 
     func undoRecordedReview(of group: CleanupSuggestion, kept: Int) {
+        if reviewedGroupIDs.remove(group.id) != nil {
+            defaults.set(reviewedGroupIDs.sorted(), forKey: Self.reviewedKey)
+        }
         orderLearning.undoCompletion(reason: group.reason, kept: kept, total: group.assetIDs.count)
         saveOrderLearning()
     }
@@ -447,12 +566,11 @@ final class PhotoSuggestionService {
 
     private func receive(_ update: SuggestionScanUpdate, generation: UUID) {
         guard self.generation == generation else { return }
-        let oldGroups = groups
-        let previousProgress = SuggestionScanProgress(checked: checkedCount, total: totalCount, unavailable: unavailableCount)
         var groupsChanged = false
         // Numeric scan progress deliberately carries no new groups. Avoid
         // rebuilding hundreds of group IDs on the main actor for that update.
         if !update.groups.isEmpty || update.ready || update.complete {
+            let oldGroups = groups
             let previous = Dictionary(uniqueKeysWithValues: oldGroups.map { ($0.id, $0) })
             let incomingGroups = update.groups.map { incoming in
                 guard let earlier = previous[incoming.id] else { return incoming }
@@ -502,15 +620,15 @@ final class PhotoSuggestionService {
             errorMessage = update.error
             scanTask = nil
         }
-        let currentProgress = SuggestionScanProgress(checked: checkedCount, total: totalCount, unavailable: unavailableCount)
-        let previousSavedStep = (previousProgress.percentage(complete: false) ?? 0) / 5
-        let currentSavedStep = (currentProgress.percentage(complete: false) ?? 0) / 5
-        if groupsChanged || previousSavedStep != currentSavedStep || update.ready || update.complete || update.paused {
+        publishDisplayedProgress(force: update.ready || update.complete || update.paused)
+        let currentSavedStep = (scanProgress.percentage(complete: false) ?? 0) / 5
+        if groupsChanged || savedProgressStep != currentSavedStep || update.ready || update.complete || update.paused {
             saveGroupSnapshot()
         }
     }
 
     private func saveGroupSnapshot() {
+        savedProgressStep = (scanProgress.percentage(complete: false) ?? 0) / 5
         snapshotRevision &+= 1
         let revision = snapshotRevision
         let snapshot = SuggestionGroupSnapshot(
@@ -529,6 +647,14 @@ final class PhotoSuggestionService {
 actor SuggestionInteractionGate {
     private let clock = ContinuousClock()
     private var resumeAt: ContinuousClock.Instant?
+    private(set) var progressReportingEnabled = false
+    private var progressVisibilityRevision = 0
+
+    func setProgressReportingEnabled(_ enabled: Bool, revision: Int) {
+        guard revision > progressVisibilityRevision else { return }
+        progressVisibilityRevision = revision
+        progressReportingEnabled = enabled
+    }
 
     func deferWork(for duration: Duration) {
         let requestedResume = clock.now.advanced(by: duration)
@@ -594,6 +720,22 @@ struct SuggestionScanProgress: Codable, Equatable, Sendable {
     }
 }
 
+/// The status row changes at most once every two seconds, only when its
+/// counts changed. Navigation and terminal states may synchronize immediately.
+struct SuggestionProgressDisplayPolicy {
+    private var lastProgress: SuggestionScanProgress?
+    private var lastPublication: ContinuousClock.Instant?
+
+    mutating func update(_ progress: SuggestionScanProgress, visible: Bool,
+                         at now: ContinuousClock.Instant, force: Bool = false) -> SuggestionScanProgress? {
+        guard visible, progress != lastProgress else { return nil }
+        if !force, let lastPublication, now - lastPublication < .seconds(2) { return nil }
+        lastProgress = progress
+        lastPublication = now
+        return progress
+    }
+}
+
 struct SuggestionGroupSnapshot: Codable, Sendable {
     let groups: [CleanupSuggestion]
     let hasScanned: Bool
@@ -643,6 +785,14 @@ private actor SuggestionGroupSnapshotWriter {
             return false
         }
     }
+
+    func clear(revision: Int) throws {
+        guard revision > latestRevision else { return }
+        latestRevision = revision
+        if FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
 }
 
 private struct SuggestionScanUpdate: Sendable {
@@ -661,6 +811,7 @@ private struct SuggestionScanUpdate: Sendable {
 /// value snapshots cross into the UI; no image analysis runs on the main actor.
 private actor PhotoSuggestionAnalyzer {
     private var analyses: [String: SuggestionAnalysis] = [:]
+    private var cacheRevision = 0
     private var groupingRevision = 0
     private var cachedGroupingRevision: Int?
     private var cachedGroups: [CleanupSuggestion]?
@@ -688,6 +839,8 @@ private actor PhotoSuggestionAnalyzer {
     private var loaded = false
     private var cacheError: String?
     private var lastCacheSave = Date.distantPast
+    private var progressGeneration: UUID?
+    private var latestProgress: SuggestionScanProgress?
     private let legacyCacheURL: URL = URL.applicationSupportDirectory
         .appending(path: "PhotoSuggestions", directoryHint: .isDirectory)
         .appending(path: "analysis-v1.json")
@@ -698,10 +851,15 @@ private actor PhotoSuggestionAnalyzer {
         .appending(path: "PhotoSuggestions", directoryHint: .isDirectory)
         .appending(path: "resource-failures-v1.json")
 
+    func currentProgress(for generation: UUID) -> SuggestionScanProgress? {
+        progressGeneration == generation ? latestProgress : nil
+    }
+
     func scorePriority(_ members: [SuggestionAsset]) async -> [String: SuggestionAnalysis] {
         loadCache()
+        let activeCacheRevision = cacheRevision
         for asset in members {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled, cacheRevision == activeCacheRevision else { break }
             guard let current = analyses[asset.id], current.matches(asset),
                   current.previewUnavailableAt == nil, current.aestheticScore == nil else { continue }
             let fastImage = await preview(for: asset.id, fast: true)
@@ -720,7 +878,8 @@ private actor PhotoSuggestionAnalyzer {
             } else {
                 score = nil
             }
-            guard !Task.isCancelled, var latest = analyses[asset.id], latest.matches(asset) else { break }
+            guard !Task.isCancelled, cacheRevision == activeCacheRevision,
+                  var latest = analyses[asset.id], latest.matches(asset) else { break }
             latest.aestheticScore = score
             // A fast local rendition may be too small for Vision. Leave that
             // asset eligible for the normal high-quality pass later.
@@ -729,6 +888,7 @@ private actor PhotoSuggestionAnalyzer {
             groupingRevision &+= 1
             dirtyAnalysisIDs.insert(asset.id)
         }
+        guard cacheRevision == activeCacheRevision else { return [:] }
         let result = Dictionary(uniqueKeysWithValues: members.compactMap { member in
             analyses[member.id].map { (member.id, $0) }
         })
@@ -748,15 +908,17 @@ private actor PhotoSuggestionAnalyzer {
 
     func portraitEvidence(for members: [SuggestionAsset]) async -> [String: SuggestionPortraitEvidence] {
         loadCache()
+        let activeCacheRevision = cacheRevision
         var result: [String: SuggestionPortraitEvidence] = [:]
         for member in members {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled, cacheRevision == activeCacheRevision else { break }
             guard var current = analyses[member.id], current.matches(member) else { continue }
             if current.portraitClassifierVersion == SuggestionPortraitEvidence.classifierVersion {
                 if let evidence = current.portraitEvidence { result[member.id] = evidence }
                 continue
             }
-            guard let evidence = await detectPortraitEvidence(for: member.id), !Task.isCancelled else { continue }
+            guard let evidence = await detectPortraitEvidence(for: member.id), !Task.isCancelled,
+                  cacheRevision == activeCacheRevision else { continue }
             current.portraitEvidence = evidence
             current.portraitChecked = true
             current.portraitClassifierVersion = SuggestionPortraitEvidence.classifierVersion
@@ -765,8 +927,39 @@ private actor PhotoSuggestionAnalyzer {
             groupingRevision &+= 1
             result[member.id] = evidence
         }
+        guard cacheRevision == activeCacheRevision else { return [:] }
         if !Task.isCancelled { Task(priority: .utility) { self.saveCache(force: true) } }
         return result
+    }
+
+    func clearCache() throws {
+        cacheRevision &+= 1
+        analysisStore = nil
+        analyses.removeAll()
+        featureCache = BoundedCache(capacity: 128)
+        distanceCache = BoundedCache(capacity: 4096)
+        featureRevision = 0
+        groupingRevision &+= 1
+        cachedGroupingRevision = nil
+        cachedGroups = nil
+        dirtyAnalysisIDs.removeAll()
+        removedAnalysisIDs.removeAll()
+        resourceVerificationFailures.removeAll()
+        resourceFailuresDirty = false
+        progressGeneration = nil
+        latestProgress = nil
+        loaded = false
+        cacheError = nil
+        lastCacheSave = .distantPast
+
+        let sqliteSidecars = ["-journal", "-wal", "-shm"].map {
+            URL(fileURLWithPath: storeURL.path + $0)
+        }
+        for url in [storeURL, legacyCacheURL, resourceFailureURL] + sqliteSidecars {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
     }
 
     private func detectPortraitEvidence(for identifier: String) async -> SuggestionPortraitEvidence? {
@@ -823,7 +1016,9 @@ private actor PhotoSuggestionAnalyzer {
     }
 
     func scan(_ assets: [SuggestionAsset], background: Bool, isCharging: Bool,
+              generation: UUID, now: Date,
               interactionGate: SuggestionInteractionGate,
+              liveProgress: @Sendable (SuggestionScanProgress) async -> Void,
               progress: @Sendable (SuggestionScanUpdate) async -> Void) async {
         loadCache()
         let current = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
@@ -854,7 +1049,7 @@ private actor PhotoSuggestionAnalyzer {
             return analysis.matches(asset)
         }
         if previousFailures != resourceVerificationFailures { resourceFailuresDirty = true }
-        let ordered = SuggestionScanOrder.ordered(assets, analyzedIDs: Set(analyses.keys))
+        let ordered = SuggestionScanOrder.ordered(assets, now: now, analyzedIDs: Set(analyses.keys))
         let pendingAnalysisCount = ordered.reduce(into: 0) { count, asset in
             if analyses[asset.id] == nil ||
                 (asset.isScreenshot && analyses[asset.id]?.previewUnavailableAt == nil &&
@@ -868,11 +1063,14 @@ private actor PhotoSuggestionAnalyzer {
         // split for most of a long library scan.
         let earlyGroupRefreshCounts = Set([min(4, pendingAnalysisCount), min(16, pendingAnalysisCount)])
         let resumed = SuggestionScanProgress.fromCache(assets: ordered, analyses: analyses)
+        progressGeneration = generation
+        latestProgress = resumed
         var checked = resumed.checked
         var unavailable = resumed.unavailable
         var analysisFailures = 0
         var newAnalyses = 0
         let clock = ContinuousClock()
+        var lastLiveProgressCheck = clock.now
         let lightweightProgressStride = max(4, assets.count / 100)
         if !background { await interactionGate.waitIfNeeded() }
         guard !Task.isCancelled else { return }
@@ -915,7 +1113,9 @@ private actor PhotoSuggestionAnalyzer {
                 }
                 newAnalyses += 1
                 try? await Task.sleep(for: SuggestionScanPace.effectiveDelay(background: background, isCharging: isCharging))
+                guard !Task.isCancelled else { saveCache(force: true); return }
                 checked += 1
+                latestProgress = SuggestionScanProgress(checked: checked, total: ordered.count, unavailable: unavailable)
                 // A full-library regroup is much more expensive than one
                 // image analysis. Batch discoveries so progress stays visible
                 // without repeatedly spending seconds on the same photos.
@@ -934,6 +1134,14 @@ private actor PhotoSuggestionAnalyzer {
                     // Keep existing groups visible; this update only advances
                     // the numeric progress without rebuilding Vision groups.
                     await progress(SuggestionScanUpdate(groups: [], checked: checked, unavailable: unavailable))
+                }
+                // This clock check adds no timer. The existing analysis loop
+                // emits only a small value, and only while the status is visible.
+                if !background, clock.now - lastLiveProgressCheck >= .seconds(2) {
+                    lastLiveProgressCheck = clock.now
+                    if await interactionGate.progressReportingEnabled, let latestProgress {
+                        await liveProgress(latestProgress)
+                    }
                 }
             }
         }
@@ -1342,11 +1550,18 @@ enum SuggestionAnalysisCache {
 }
 
 enum SuggestionScanOrder {
+    static func includes(_ asset: SuggestionAsset, now: Date) -> Bool {
+        !asset.isScreenshot || (asset.createdAt ?? .distantFuture) < now.addingTimeInterval(-90 * 86_400)
+    }
+
+    static func candidateCount(in assets: [SuggestionAsset], now: Date) -> Int {
+        assets.count { includes($0, now: now) }
+    }
+
     static func ordered(
         _ assets: [SuggestionAsset], now: Date = .now, analyzedIDs: Set<String> = []
     ) -> [SuggestionAsset] {
-        let screenshotCutoff = now.addingTimeInterval(-90 * 86_400)
-        let candidates = assets.filter { !$0.isScreenshot || ($0.createdAt ?? .distantFuture) < screenshotCutoff }
+        let candidates = assets.filter { includes($0, now: now) }
 
         func interleaved(_ candidates: [SuggestionAsset]) -> [SuggestionAsset] {
             let screenshots = candidates.filter(\.isScreenshot).sorted {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// A short, skippable guide shown once before the first review session.
 struct FirstUseGuideView: View {
@@ -6,6 +7,9 @@ struct FirstUseGuideView: View {
     let onFinish: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var page = 0
 
     private let steps: [GuideStep] = [
@@ -13,7 +17,7 @@ struct FirstUseGuideView: View {
             symbol: "hand.draw",
             tint: .blue,
             title: String(localized: "三种手势，一张张选"),
-            intro: String(localized: "用下方按钮或滑动做决定，也可在设置开启更方便的侧边点按。"),
+            intro: String(localized: "用下方按钮或滑动做决定，也可在设置开启更方便的侧边点按。iCloud 照片默认使用缩略图。"),
             tips: [
                 GuideTip(symbol: "arrow.left", title: String(localized: "左滑 · 待删除"),
                          detail: String(localized: "确认前不会从系统照片删除。")),
@@ -47,12 +51,12 @@ struct FirstUseGuideView: View {
             symbol: "wand.and.stars",
             tint: .indigo,
             title: String(localized: "清理建议"),
-            intro: String(localized: "从首页彩色按钮或底部导航进入；应用会在本机寻找值得先看的照片。"),
+            intro: String(localized: "从首页或底部导航进入。应用会自动在本机分析建议，可在设置关闭。"),
             tips: [
                 GuideTip(symbol: "square.on.square", title: String(localized: "按组查看"),
                          detail: String(localized: "相似照片、原始文件完全相同的副本，以及超过 90 天的临时截图会分组呈现。")),
                 GuideTip(symbol: "checkmark.circle", title: String(localized: "建议由你决定"),
-                         detail: String(localized: "相似组可以参考美学评分，选择保留一张或多张；建议不会自动删除照片。")),
+                         detail: String(localized: "相似组可以选择保留一张或多张；建议不会自动删除照片。")),
                 GuideTip(symbol: "plus.magnifyingglass", title: String(localized: "大图比较"),
                          detail: String(localized: "点照片打开大图，左右切换比较，双指放大查看细节。"))
             ]
@@ -77,7 +81,7 @@ struct FirstUseGuideView: View {
             symbol: "icloud",
             tint: .blue,
             title: String(localized: "iCloud 照片预览"),
-            intro: String(localized: "本地清晰照片会提前准备，iCloud 原片默认不自动下载。"),
+            intro: String(localized: "iCloud 照片默认使用缩略图，不自动下载原片。"),
             tips: [
                 GuideTip(symbol: "photo", title: String(localized: "先看清，再决定"),
                          detail: String(localized: "仅存于 iCloud 的照片会先显示设备可取得的预览，可能较模糊。")),
@@ -90,31 +94,155 @@ struct FirstUseGuideView: View {
     ]
 
     private var guideSteps: [GuideStep] {
-        compact ? [steps[0], steps[2], steps[3], steps[4], steps[1]] : steps
+        compact ? [steps[0], steps[3], steps[4]] : steps
+    }
+
+    private var usesExpandedGuideLayout: Bool {
+        (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(String(localized: "择影"))
-                    .font(.title2.weight(.bold))
-                Spacer()
-                Button(String(localized: "跳过"), action: onFinish)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHint(String(localized: "关闭使用指南"))
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 20)
+        GeometryReader { geometry in
+            let cameraFrame: CGRect? = {
+                guard #available(iOS 27.1, *),
+                      UIDevice.current.userInterfaceIdiom == .phone,
+                      geometry.size.height > geometry.size.width else { return nil }
+                return geometry.reservedRegions(kind: .occlusion)
+                    .first { $0.isActive && $0.frame.midX > geometry.size.width / 2 &&
+                        $0.frame.minY < geometry.size.height / 4 }?.frame
+            }()
+            let hasExpandedFold: Bool = {
+                guard #available(iOS 27.1, *),
+                      UIDevice.current.userInterfaceIdiom == .phone,
+                      geometry.size.width > geometry.size.height else { return false }
+                return geometry.reservedRegions(kind: .division, options: .includeInactive)
+                    .contains { $0.frame.minX > 0 && $0.frame.maxX < geometry.size.width }
+            }()
+            let expandedStatusColumnX = geometry.size.width + geometry.safeAreaInsets.trailing - 47
 
-            TabView(selection: $page) {
-                ForEach(guideSteps.indices, id: \.self) { index in
-                    guidePage(guideSteps[index])
-                        .tag(index)
+            VStack(spacing: 0) {
+                if usesExpandedGuideLayout {
+                    Color.clear.frame(height: 24)
+                } else if let cameraFrame {
+                    Text(String(localized: "择影"))
+                        .font(.title2.weight(.bold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 44)
+                        .padding(.horizontal, 24)
+                        .padding(.top, max(0, cameraFrame.midY - 22))
+                } else {
+                    HStack {
+                        Text(String(localized: "择影"))
+                            .font(.title2.weight(.bold))
+                        Spacer()
+                        Button(String(localized: "跳过"), action: onFinish)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHint(String(localized: "关闭使用指南"))
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 20)
+                }
+
+                TabView(selection: $page) {
+                    ForEach(guideSteps.indices, id: \.self) { index in
+                        guidePage(guideSteps[index])
+                            .tag(index)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+
+                if usesExpandedGuideLayout {
+                    ZeyingFoldAwareSplit {
+                        Color.clear
+                    } trailing: {
+                        guideFooter
+                    }
+                    .frame(height: page == guideSteps.count - 1 ? 148 : 104)
+                    .padding(.bottom, 8)
+                } else {
+                    guideFooter
+                        .frame(width: cameraFrame == nil ? nil : geometry.size.width)
+                        .offset(x: cameraFrame == nil ? 0 : geometry.safeAreaInsets.trailing / 2)
+                        .padding(.bottom, 24)
                 }
             }
-            .tabViewStyle(.page(indexDisplayMode: .always))
-            .indexViewStyle(.page(backgroundDisplayMode: .interactive))
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .background(Color(uiColor: .systemBackground).ignoresSafeArea())
+            .overlay(alignment: .topTrailing) {
+                if usesExpandedGuideLayout {
+                    Button(String(localized: "跳过"), action: onFinish)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .position(
+                            x: hasExpandedFold
+                                ? expandedStatusColumnX
+                                : geometry.size.width - 46,
+                            y: hasExpandedFold ? 128 : 54
+                        )
+                        .accessibilityHint(String(localized: "关闭使用指南"))
+                } else if let cameraFrame {
+                    Button(String(localized: "跳过"), action: onFinish)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .position(x: cameraFrame.midX, y: cameraFrame.maxY + 112)
+                        .accessibilityHint(String(localized: "关闭使用指南"))
+                }
+            }
+            .accessibilityLabel(String(localized: "择影使用指南"))
+        }
+    }
+
+    private func guidePage(_ step: GuideStep) -> some View {
+        Group {
+            if usesExpandedGuideLayout {
+                ZeyingFoldAwareSplit {
+                    ScrollView {
+                        guideIntroduction(step)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 28)
+                    }
+                    .scrollIndicators(.hidden)
+                } trailing: {
+                    ScrollView {
+                        guideTips(step)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 28)
+                    }
+                    .scrollIndicators(.hidden)
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        guideIntroduction(step)
+                        guideTips(step)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 28)
+                    .padding(.bottom, 24)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+        .clipped()
+    }
+
+    private var guideFooter: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                ForEach(guideSteps.indices, id: \.self) { index in
+                    Circle()
+                        .fill(index == page ? Color.accentColor : Color.secondary)
+                        .frame(width: 8, height: 8)
+                }
+            }
+            .padding(.top, 8)
+            .padding(.bottom, 16)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(String(format: String(localized: "使用指南，第 %d 页，共 %d 页"), page + 1, guideSteps.count))
 
             if page == guideSteps.count - 1 {
                 Text(String(localized: "之后也可以在设置里再次查看说明指南。"))
@@ -122,7 +250,6 @@ struct FirstUseGuideView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 24)
                     .padding(.bottom, 16)
             }
 
@@ -141,50 +268,45 @@ struct FirstUseGuideView: View {
                     .padding(.vertical, 7)
             }
             .buttonStyle(ZeyingGlassButtonStyle())
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
+            .padding(.bottom, verticalSizeClass == .compact ? 8 : 0)
         }
-        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
-        .accessibilityLabel(String(localized: "择影使用指南"))
+        .frame(maxWidth: usesExpandedGuideLayout ? 360 : .infinity)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 24)
     }
 
-    private func guidePage(_ step: GuideStep) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Image(systemName: step.symbol)
-                    .font(.system(size: 34, weight: .medium))
-                    .foregroundStyle(step.tint)
-                    .frame(width: 72, height: 72)
-                    .background(step.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 22))
-                    .accessibilityHidden(true)
+    private func guideIntroduction(_ step: GuideStep) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Image(systemName: step.symbol)
+                .font(.system(size: 34, weight: .medium))
+                .foregroundStyle(step.tint)
+                .frame(width: 72, height: 72)
+                .background(step.tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 22))
+                .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(step.title)
-                        .font(.title.weight(.bold))
-                        .accessibilityAddTraits(.isHeader)
-                    if let intro = step.intro {
-                        Text(intro)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
-
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(step.tips.indices, id: \.self) { index in
-                        if index > 0 { Divider() }
-                        guideTip(step.tips[index], tint: step.tint)
-                    }
+            VStack(alignment: .leading, spacing: 7) {
+                Text(step.title)
+                    .font(.title.weight(.bold))
+                    .accessibilityAddTraits(.isHeader)
+                if let intro = step.intro {
+                    Text(intro)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.top, 28)
-            .padding(.bottom, 24)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .scrollIndicators(.hidden)
-        .clipped()
-        .padding(.bottom, 36)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func guideTips(_ step: GuideStep) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(step.tips.indices, id: \.self) { index in
+                if index > 0 { Divider() }
+                guideTip(step.tips[index], tint: step.tint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func guideTip(_ tip: GuideTip, tint: Color) -> some View {

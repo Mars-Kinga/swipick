@@ -4,15 +4,20 @@ import UIKit
 
 struct SettingsView: View {
     let library: PhotoLibraryService
+    let reviews: ReviewStore
 
     @Environment(AppSettings.self) private var settings
+    @Environment(PhotoSuggestionService.self) private var suggestions
     @State private var showingGuide = false
+    @State private var showingClearAnalysisConfirmation = false
+    @State private var showingClearAnalysisError = false
 
     var body: some View {
         @Bindable var settings = settings
 
         VStack(spacing: 0) {
-            ZeyingRootPageTitle(title: String(localized: "设置"))
+            ZeyingRootPageTitle(title: String(localized: "设置"),
+                                matchesHomeExpandedPosition: true, usesHomeHeaderHeight: true)
 
             Form {
                 Section {
@@ -47,13 +52,40 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle(isOn: Binding(get: { !suggestions.isManuallyPaused }, set: { enabled in
+                        if enabled { suggestions.start(library: library, reviews: reviews) }
+                        else { suggestions.pause(manually: true) }
+                    })) {
+                        Label(String(localized: "自动分析清理建议"), systemImage: "wand.and.stars")
+                    }
+                    .tint(.blue)
+                    .disabled(suggestions.isClearingAnalysisData)
+
+                    Button(role: .destructive) {
+                        showingClearAnalysisConfirmation = true
+                    } label: {
+                        HStack {
+                            Label(String(localized: "清除建议分析数据"), systemImage: "trash")
+                            if suggestions.isClearingAnalysisData {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(suggestions.isClearingAnalysisData)
+                } footer: {
+                    Text(String(localized: "清除后会暂停自动分析；再次开启时需要重新分析照片。"))
+                }
+
+                Section {
                     Toggle(isOn: $settings.iCloudAutoDownloadEnabled) {
                         Label(String(localized: "自动下载 iCloud 原片"), systemImage: "icloud.and.arrow.down")
                     }
                     .tint(.blue)
-                    .accessibilityHint(String(localized: "默认使用低清预览；云端小图可能使用网络。开启后，当前照片还会下载高清内容，不会预下载后续照片。"))
                 } header: {
                     Text("iCloud")
+                } footer: {
+                    Text(String(localized: "默认使用缩略图；开启后下载当前原片，可能占用流量和空间。"))
                 }
 
                 Section {
@@ -77,12 +109,33 @@ struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            .contentMargins(.top, 0, for: .scrollContent)
             .scrollContentBackground(.hidden)
             .background(Color.clear)
         }
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $showingGuide) {
             FirstUseGuideView { showingGuide = false }
+        }
+        .confirmationDialog(String(localized: "清除建议分析数据？"),
+                            isPresented: $showingClearAnalysisConfirmation,
+                            titleVisibility: .visible) {
+            Button(String(localized: "清除建议分析数据"), role: .destructive) {
+                Task {
+                    do {
+                        try await suggestions.clearAnalysisData()
+                    } catch {
+                        showingClearAnalysisError = true
+                    }
+                }
+            }
+        } message: {
+            Text(String(localized: "将删除本机生成的建议分析数据。照片、审核决定和清单不受影响。自动分析会暂停；再次开启后需要重新分析照片，可能耗时并消耗电量。"))
+        }
+        .alert(String(localized: "无法清除建议分析数据"), isPresented: $showingClearAnalysisError) {
+            Button(String(localized: "好的"), role: .cancel) {}
+        } message: {
+            Text(String(localized: "请稍后重试。"))
         }
     }
 

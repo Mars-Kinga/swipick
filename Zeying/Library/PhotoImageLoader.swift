@@ -9,7 +9,8 @@ enum PhotoImageLoader {
         contentMode: PHImageContentMode,
         deliveryMode: PHImageRequestOptionsDeliveryMode,
         timeout: Duration? = .seconds(5),
-        onDegraded: (@MainActor (UIImage) -> Void)? = nil
+        onDegraded: (@MainActor (UIImage) -> Void)? = nil,
+        onCloud: (@MainActor () -> Void)? = nil
     ) async -> UIImage? {
         guard !Task.isCancelled,
               let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject,
@@ -36,6 +37,7 @@ enum PhotoImageLoader {
                     let cancelled = (info?[PHImageCancelledKey] as? Bool) == true
                     let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) == true
                     let cloudOnly = (info?[PHImageResultIsInCloudKey] as? Bool) == true
+                    if cloudOnly, !cancelled, let onCloud { Task { @MainActor in onCloud() } }
                     if cancelled || info?[PHImageErrorKey] != nil {
                         request.resume(returning: nil)
                     } else if degraded {

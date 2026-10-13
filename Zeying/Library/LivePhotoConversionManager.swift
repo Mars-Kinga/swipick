@@ -29,6 +29,14 @@ struct LivePhotoConversion: Codable, Identifiable {
     var stillIdentifier: String?
     var phase: Phase
     var verification: Verification
+    /// The generated still must inherit a system-favorite request before the
+    /// original can be staged for deletion. This is persisted so an
+    /// interrupted import or retry cannot silently drop the request.
+    var favoriteCopyRequested: Bool
+    /// A pending local favorite is distinct from an already-applied system
+    /// favorite. Keep that intent available if the user later cancels the
+    /// conversion and the original is restored from the deletion list.
+    var sourcePendingFavorite: Bool
 
     var id: String { sourceIdentifier }
 
@@ -42,6 +50,8 @@ struct LivePhotoConversion: Codable, Identifiable {
         case stillIdentifier
         case phase
         case verification
+        case favoriteCopyRequested
+        case sourcePendingFavorite
     }
 
     init(
@@ -53,7 +63,9 @@ struct LivePhotoConversion: Codable, Identifiable {
         albumIdentifiers: [String],
         stillIdentifier: String?,
         phase: Phase,
-        verification: Verification = .pending
+        verification: Verification = .pending,
+        favoriteCopyRequested: Bool = false,
+        sourcePendingFavorite: Bool = false
     ) {
         self.sourceIdentifier = sourceIdentifier
         self.token = token
@@ -64,6 +76,8 @@ struct LivePhotoConversion: Codable, Identifiable {
         self.stillIdentifier = stillIdentifier
         self.phase = phase
         self.verification = verification
+        self.favoriteCopyRequested = favoriteCopyRequested
+        self.sourcePendingFavorite = sourcePendingFavorite
     }
 
     init(from decoder: Decoder) throws {
@@ -77,6 +91,8 @@ struct LivePhotoConversion: Codable, Identifiable {
         stillIdentifier = try container.decodeIfPresent(String.self, forKey: .stillIdentifier)
         phase = try container.decode(Phase.self, forKey: .phase)
         verification = try container.decodeIfPresent(Verification.self, forKey: .verification) ?? .pending
+        favoriteCopyRequested = try container.decodeIfPresent(Bool.self, forKey: .favoriteCopyRequested) ?? false
+        sourcePendingFavorite = try container.decodeIfPresent(Bool.self, forKey: .sourcePendingFavorite) ?? false
     }
 }
 
@@ -86,6 +102,7 @@ enum LivePhotoConversionError: LocalizedError {
     case originalChanged
     case exportFailed(String)
     case creationFailed(String)
+    case favoriteCopyFailed(String)
     case copyUnverified(String)
     case userCancelled
     case deletionFailed(String)
@@ -105,6 +122,8 @@ enum LivePhotoConversionError: LocalizedError {
             String(localized: "无法导出当前显示的静态画面：\(detail)")
         case .creationFailed(let detail):
             String(localized: "无法创建静态照片：\(detail)")
+        case .favoriteCopyFailed(let detail):
+            String(localized: "无法收藏静态副本：\(detail)。原实况照片仍然保留，待删除清单未改变。")
         case .copyUnverified(let detail):
             String(localized: "静态副本尚未通过核对：\(detail)。原实况照片仍然保留。")
         case .userCancelled:
@@ -200,16 +219,35 @@ final class LivePhotoConversionManager {
         warmedExport.task.cancel()
     }
 
-    func prepare(asset: PHAsset, library: PhotoLibraryService) async throws -> LivePhotoConversion {
+    func prepare(
+        asset: PHAsset,
+        library: PhotoLibraryService,
+        favoriteCopyRequested: Bool = false,
+        sourcePendingFavorite: Bool = false
+    ) async throws -> LivePhotoConversion {
         try requireReadableJournal()
         try requireFullAccess()
         let sourceIdentifier = asset.localIdentifier
+        let requestedFavorite = favoriteCopyRequested || sourcePendingFavorite || asset.isFavorite
         guard inFlight.insert(sourceIdentifier).inserted else {
             throw LivePhotoConversionError.operationAlreadyRunning
         }
         defer { inFlight.remove(sourceIdentifier) }
 
         if var existing = pending[sourceIdentifier] {
+            // A journal written by an older interrupted attempt may retain a
+            // pending favorite intent without the derived copy flag. Treat
+            // either persisted bit as a request so recovery cannot silently
+            // return an unstarred still.
+            let updatedFavoriteRequest = existing.favoriteCopyRequested ||
+                existing.sourcePendingFavorite || requestedFavorite
+            let updatedPendingFavorite = existing.sourcePendingFavorite || sourcePendingFavorite
+            if existing.favoriteCopyRequested != updatedFavoriteRequest ||
+                existing.sourcePendingFavorite != updatedPendingFavorite {
+                existing.favoriteCopyRequested = updatedFavoriteRequest
+                existing.sourcePendingFavorite = updatedPendingFavorite
+                try store(existing)
+            }
             if existing.stillIdentifier == nil,
                let recovered = await Self.findStill(with: existing.token, date: existing.creationDate) {
                 existing.stillIdentifier = recovered
@@ -238,6 +276,7 @@ final class LivePhotoConversionManager {
             if existing.stillIdentifier != nil,
                pending[sourceIdentifier] != nil {
                 try verifyAndStore(&existing, requireOriginal: existing.phase != .originalDeleted)
+                try await ensureStillFavoriteIfRequested(existing)
                 return existing
             } else if existing.stillIdentifier == nil {
                 guard Date().timeIntervalSince(existing.startedAt) > 30 else {
@@ -265,7 +304,9 @@ final class LivePhotoConversionManager {
             albumIdentifiers: albums.map(\.localIdentifier),
             stillIdentifier: nil,
             phase: .preparing,
-            verification: .pending
+            verification: .pending,
+            favoriteCopyRequested: requestedFavorite,
+            sourcePendingFavorite: sourcePendingFavorite
         )
         try store(record)
 
@@ -317,7 +358,7 @@ final class LivePhotoConversionManager {
                 let request = PHAssetCreationRequest.forAsset()
                 request.creationDate = creationDate
                 request.location = original.location
-                request.isFavorite = original.isFavorite
+                request.isFavorite = original.isFavorite || requestedFavorite
                 request.isHidden = original.isHidden
 
                 let resourceOptions = PHAssetResourceCreationOptions()
@@ -351,10 +392,13 @@ final class LivePhotoConversionManager {
         // library snapshot refresh happens after deletion (or on recovery),
         // avoiding a full-library scan between the two conversion steps.
         try verifyAndStore(&record, requireOriginal: true)
+        try await ensureStillFavoriteIfRequested(record)
         return record
     }
 
-    func deleteOriginal(
+    /// Complete a conversion only when another Photos action has already
+    /// removed the original. This path never requests a deletion from Photos.
+    func finishMissingOriginal(
         sourceIdentifier: String,
         library: PhotoLibraryService,
         reviews: ReviewStore,
@@ -369,37 +413,18 @@ final class LivePhotoConversionManager {
         guard var record = pending[sourceIdentifier], record.stillIdentifier != nil else {
             throw LivePhotoConversionError.conversionMissing
         }
-        if record.phase != .originalDeleted,
-           Self.fetchAsset(sourceIdentifier) == nil {
-            // Full library access is required above, so absence here means
-            // another actor has already removed the source. Keep the still.
-            record.phase = .originalDeleted
-            try store(record)
+        guard Self.fetchAsset(sourceIdentifier) == nil else {
+            throw LivePhotoConversionError.deletionFailed(
+                String(localized: "原实况照片仍在图库中，请在清单中确认删除")
+            )
         }
-        // Always verify again on every retry. A legacy or previously failed
-        // record must earn the verified state before any destructive change.
-        try verifyAndStore(&record, requireOriginal: record.phase != .originalDeleted)
-
         if record.phase != .originalDeleted {
-            guard let original = Self.fetchAsset(sourceIdentifier) else {
-                throw LivePhotoConversionError.originalUnavailable
-            }
-            // Keep the PhotoKit error intact so an explicit system
-            // cancellation remains a pending conversion instead of becoming
-            // a generic failure. The record is written immediately after the
-            // PhotoKit transaction, before the library snapshot refresh.
-            try await Self.deleteAsset(original)
-            guard Self.fetchAsset(sourceIdentifier) == nil else {
-                throw LivePhotoConversionError.deletionFailed(
-                    String(localized: "系统尚未确认原件已移除")
-                )
-            }
             record.phase = .originalDeleted
             try store(record)
         }
+        try verifyAndStore(&record, requireOriginal: false)
+        try await ensureStillFavoriteIfRequested(record)
         try finishLocalState(record, reviews: reviews, albumAssignments: albumAssignments)
-        // The PhotoKit commit and local records are complete. Refresh the
-        // library snapshot without keeping the conversion sheet on screen.
         Task { await library.refresh() }
     }
 
@@ -421,6 +446,7 @@ final class LivePhotoConversionManager {
             )
         }
         try verifyAndStore(&record, requireOriginal: true)
+        try requireFavoriteCopyReady(record)
         if reviews.decision(for: sourceIdentifier) != .delete {
             guard reviews.decide(.delete, for: sourceIdentifier) else {
                 throw LivePhotoConversionError.copyUnverified(
@@ -448,6 +474,7 @@ final class LivePhotoConversionManager {
                 )
             }
             try verifyAndStore(&record, requireOriginal: true)
+            try requireFavoriteCopyReady(record)
         }
     }
 
@@ -469,6 +496,7 @@ final class LivePhotoConversionManager {
         record.phase = .originalDeleted
         try store(record)
         try verifyAndStore(&record, requireOriginal: false)
+        try requireFavoriteCopyReady(record)
         try finishLocalState(record, reviews: reviews, albumAssignments: albumAssignments)
     }
 
@@ -491,12 +519,23 @@ final class LivePhotoConversionManager {
               source.mediaSubtypes.contains(.photoLive) else {
             throw LivePhotoConversionError.originalUnavailable
         }
+        let restorePendingFavorite = record.sourcePendingFavorite
         // Never leave the original staged for deletion while removing the
         // only verified still copy that made that deletion safe.
         guard reviews.recoverPendingDeletions([sourceIdentifier]) else {
             throw LivePhotoConversionError.copyUnverified(
                 reviews.errorMessage ?? String(localized: "无法恢复待删除项目。")
             )
+        }
+        if restorePendingFavorite {
+            guard reviews.stageFavorite(
+                for: sourceIdentifier,
+                alreadyFavorite: source.isFavorite
+            ) else {
+                throw LivePhotoConversionError.copyUnverified(
+                    reviews.errorMessage ?? String(localized: "无法恢复待确认收藏。")
+                )
+            }
         }
         if Self.fetchAsset(stillIdentifier) != nil {
             guard let still = Self.fetchAsset(stillIdentifier) else {
@@ -532,6 +571,7 @@ final class LivePhotoConversionManager {
                         try store(updated)
                     }
                     try verifyAndStore(&updated, requireOriginal: false)
+                    try await ensureStillFavoriteIfRequested(updated)
                     try finishLocalState(
                         updated, reviews: reviews, albumAssignments: albumAssignments
                     )
@@ -548,6 +588,7 @@ final class LivePhotoConversionManager {
                 try? store(updated)
                 if Self.fetchAsset(record.sourceIdentifier) != nil {
                     try? verifyAndStore(&updated, requireOriginal: true)
+                    try? await ensureStillFavoriteIfRequested(updated)
                 }
             }
         }
@@ -644,6 +685,43 @@ final class LivePhotoConversionManager {
             record.verification = .failed
             try? store(record)
             throw error
+        }
+    }
+
+    /// Ensures the copy has reached the requested favorite state before any
+    /// caller is allowed to stage the original for deletion. The journal flag
+    /// remains set when this throws, so a retry can finish the same copy.
+    private func ensureStillFavoriteIfRequested(_ record: LivePhotoConversion) async throws {
+        guard record.favoriteCopyRequested else { return }
+        guard let stillIdentifier = record.stillIdentifier,
+              let still = Self.fetchAsset(stillIdentifier) else {
+            throw LivePhotoConversionError.favoriteCopyFailed(
+                String(localized: "找不到静态副本")
+            )
+        }
+        guard !still.isFavorite else { return }
+        try Task.checkCancellation()
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest(for: still).isFavorite = true
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw LivePhotoConversionError.favoriteCopyFailed(
+                PhotosFailureMessage.message(for: error)
+            )
+        }
+        try requireFavoriteCopyReady(record)
+    }
+
+    private func requireFavoriteCopyReady(_ record: LivePhotoConversion) throws {
+        guard record.favoriteCopyRequested else { return }
+        guard let stillIdentifier = record.stillIdentifier,
+              Self.fetchAsset(stillIdentifier)?.isFavorite == true else {
+            throw LivePhotoConversionError.favoriteCopyFailed(
+                String(localized: "系统尚未确认静态副本已收藏")
+            )
         }
     }
 

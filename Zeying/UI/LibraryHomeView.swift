@@ -13,6 +13,9 @@ struct LibraryHomeView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.zeyingFoldedPortraitHeaderInset) private var foldedPortraitHeaderInset
     @Environment(ReviewResumeStore.self) private var resume
 
     @State private var isRequestingAccess = false
@@ -21,6 +24,7 @@ struct LibraryHomeView: View {
     @State private var showingAllYears = false
     @State private var showingAllAlbums = false
     @State private var timeGrouping: TimeGrouping = .month
+    @State private var statisticsCache = HomeReviewStatisticsCache()
 
     private var isAuthorized: Bool {
         switch library.authorizationStatus {
@@ -29,6 +33,12 @@ struct LibraryHomeView: View {
         default:
             false
         }
+    }
+
+    private var usesExpandedHomeLayout: Bool {
+        foldedPortraitHeaderInset == 0 &&
+            (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
     }
 
     private var pendingCount: Int {
@@ -67,14 +77,11 @@ struct LibraryHomeView: View {
     }
 
     private var unreviewedCount: Int {
-        library.assets.filter { reviews.decision(for: $0.localIdentifier) == nil }.count
+        statisticsCache.snapshot(library: library, reviews: reviews).unreviewedCount
     }
 
     private var reviewedCount: Int {
-        library.assets.filter {
-            let decision = reviews.decision(for: $0.localIdentifier)
-            return decision == .keep || decision == .delete
-        }.count
+        statisticsCache.snapshot(library: library, reviews: reviews).reviewedCount
     }
 
     private var monthBuckets: [MonthBucket] { library.monthBuckets }
@@ -132,9 +139,7 @@ struct LibraryHomeView: View {
     }
 
     private var unreviewedMonthBuckets: [MonthBucket] {
-        monthBuckets.filter { bucket in
-            bucket.assets.contains { reviews.decision(for: $0.localIdentifier) == nil }
-        }
+        statisticsCache.snapshot(library: library, reviews: reviews).unreviewedMonthBuckets
     }
 
     private var continueMonth: Date? {
@@ -145,13 +150,13 @@ struct LibraryHomeView: View {
             ?? unfinished.first?.date
     }
 
-    private var continueTarget: (scope: LibraryScope, title: String, remaining: Int)? {
+    private var continueTarget: (scope: LibraryScope, title: String, remaining: Int, isContinuing: Bool)? {
         if let scope = resume.lastScope {
             let remaining = library.assets(in: scope)
                 .filter { reviews.decision(for: $0.localIdentifier) == nil }
                 .count
             if remaining > 0 {
-                return (scope, continueTitle(for: scope), remaining)
+                return (scope, continueTitle(for: scope), remaining, true)
             }
         }
 
@@ -159,10 +164,10 @@ struct LibraryHomeView: View {
             let remaining = library.assets(in: .month(month))
                 .filter { reviews.decision(for: $0.localIdentifier) == nil }
                 .count
-            return (.month(month), month.zeyingHomeMonthTitle, remaining)
+            return (.month(month), month.zeyingHomeMonthTitle, remaining, false)
         }
         guard unreviewedCount > 0 else { return nil }
-        return (.all, String(localized: "全部照片"), unreviewedCount)
+        return (.all, String(localized: "全部照片"), unreviewedCount, false)
     }
 
     private func continueTitle(for scope: LibraryScope) -> String {
@@ -217,6 +222,22 @@ struct LibraryHomeView: View {
     }
 
     private var authorizedContent: some View {
+        Group {
+            if usesExpandedHomeLayout {
+                expandedHomeContent
+            } else {
+                compactHomeContent
+            }
+        }
+        .overlay(alignment: .top) {
+            if isRefreshing {
+                ProgressView()
+                    .padding(.top, 8)
+            }
+        }
+    }
+
+    private var compactHomeContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 VStack(alignment: .leading, spacing: 12) {
@@ -253,22 +274,78 @@ struct LibraryHomeView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 4)
+            .padding(.top, 4 + foldedPortraitHeaderInset)
             .padding(.bottom, 16)
         }
         .scrollIndicators(.hidden)
         .refreshable {
-            isRefreshing = true
-            await library.refresh()
-            isRefreshing = false
+            await refreshLibrary()
         }
         .safeAreaPadding(.bottom, 16)
-        .overlay(alignment: .top) {
-            if isRefreshing {
-                ProgressView()
-                    .padding(.top, 8)
+    }
+
+    private var expandedHomeContent: some View {
+        ZeyingFoldAwareSplit {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    homeTitle
+                        .frame(height: 52, alignment: .center)
+                    overviewHeader
+                    cleanupTotalsCard
+                    if library.authorizationStatus == .limited {
+                        limitedAccessCard
+                    }
+                    if library.hasLoaded {
+                        if library.assets.isEmpty {
+                            emptyLibraryCard
+                        } else if unreviewedCount > 0 {
+                            continueCard
+                        }
+                        if pendingConfirmationCount > 0 {
+                            pendingConfirmationCard
+                        }
+                        if pendingCount > 0 {
+                            undecidedCard
+                        }
+                    } else {
+                        loadingCard
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 32)
+                .padding(.bottom, 16)
             }
+            .scrollIndicators(.hidden)
+            .refreshable { await refreshLibrary() }
+            .safeAreaPadding(.bottom, 16)
+            .frame(maxWidth: .infinity)
+        } trailing: {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    if library.hasLoaded {
+                        monthSection
+                        albumSection
+                        categorySection
+                    } else {
+                        loadingCard
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 32)
+                .padding(.bottom, 16)
+            }
+            .scrollIndicators(.hidden)
+            .refreshable { await refreshLibrary() }
+            .safeAreaPadding(.bottom, 16)
+            .frame(maxWidth: .infinity)
         }
+    }
+
+    private func refreshLibrary() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        await library.refresh()
+        isRefreshing = false
     }
 
     private var homeTitle: some View {
@@ -353,7 +430,8 @@ struct LibraryHomeView: View {
                             .buttonStyle(.plain)
                             .accessibilityHint(String(localized: "随机排列所有未处理照片，不按时间顺序"))
                         }
-                        StatPill(title: String(localized: "已决定"), value: reviewedCount, symbol: "checkmark.circle")
+                        StatPill(title: String(localized: "已决定"), value: reviewedCount,
+                                 symbol: "checkmark.circle", showsTitle: !usesExpandedHomeLayout)
                     }
                 }
                 .scrollIndicators(.hidden)
@@ -397,17 +475,12 @@ struct LibraryHomeView: View {
                             cleanupTotalItems(totals: totals)
                         }
                     } else {
-                        ViewThatFits(in: .horizontal) {
-                            HStack(alignment: .top, spacing: 6) {
-                                cleanupTotalItems(totals: totals)
-                            }
-                            LazyVGrid(
-                                columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())],
-                                alignment: .leading,
-                                spacing: 12
-                            ) {
-                                cleanupTotalItems(totals: totals)
-                            }
+                        LazyVGrid(
+                            columns: Array(repeating: GridItem(.flexible(minimum: 0), spacing: 6), count: 4),
+                            alignment: .leading,
+                            spacing: 0
+                        ) {
+                            cleanupTotalItems(totals: totals, minimumWidth: 0)
                         }
                     }
                 }
@@ -416,16 +489,16 @@ struct LibraryHomeView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(CleanupTotalsCardButtonStyle())
-        .accessibilityLabel(String(localized: "查看清理统计，已清理 \(totals.deletedPhotoCount) 张照片、\(totals.deletedVideoCount) 个视频，Live 转静态 \(LivePhotoConversionManager.shared.convertedCount) 张，已知资源大小 \(formatByteCount(totals.knownDeletedBytes))"))
+        .accessibilityLabel(String(localized: "查看清理统计，已清理 \(totals.deletedPhotoCount) 张照片、\(totals.deletedVideoCount) 个视频，Live 转静态 \(LivePhotoConversionManager.shared.convertedCount) 张，已清理大小 \(formatByteCount(totals.knownDeletedBytes))"))
         .accessibilityHint(String(localized: "打开清理统计详情"))
     }
 
     @ViewBuilder
-    private func cleanupTotalItems(totals: CleanupTotals) -> some View {
-        CleanupTotalItem(title: String(localized: "照片"), value: "\(totals.deletedPhotoCount)", symbol: "photo")
-        CleanupTotalItem(title: String(localized: "视频"), value: "\(totals.deletedVideoCount)", symbol: "video")
-        CleanupTotalItem(title: String(localized: "Live 转静态"), value: "\(LivePhotoConversionManager.shared.convertedCount)", symbol: "livephoto.slash")
-        CleanupTotalItem(title: String(localized: "已知资源大小"), value: formatByteCount(totals.knownDeletedBytes), symbol: "externaldrive")
+    private func cleanupTotalItems(totals: CleanupTotals, minimumWidth: CGFloat = 80) -> some View {
+        CleanupTotalItem(title: String(localized: "照片"), value: "\(totals.deletedPhotoCount)", symbol: "photo", minimumWidth: minimumWidth)
+        CleanupTotalItem(title: String(localized: "视频"), value: "\(totals.deletedVideoCount)", symbol: "video", minimumWidth: minimumWidth)
+        CleanupTotalItem(title: String(localized: "Live 转静态"), value: "\(LivePhotoConversionManager.shared.convertedCount)", symbol: "livephoto.slash", minimumWidth: minimumWidth)
+        CleanupTotalItem(title: String(localized: "已清理大小"), value: formatByteCount(totals.knownDeletedBytes), symbol: "externaldrive", minimumWidth: minimumWidth)
     }
 
     private func formatByteCount(_ bytes: Int64) -> String {
@@ -435,6 +508,9 @@ struct LibraryHomeView: View {
 
     private var continueCard: some View {
         let target = continueTarget
+        let title = target?.isContinuing == true
+            ? String(localized: "继续清理")
+            : String(localized: "开始清理")
         return NavigationLink(value: HomeDestination.scope(target?.scope ?? .all)) {
             HStack(alignment: .top, spacing: 16) {
                 Image(systemName: "arrow.right.circle.fill")
@@ -442,7 +518,7 @@ struct LibraryHomeView: View {
                     .frame(width: 34, height: 34)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(resume.lastScope == nil ? String(localized: "开始整理") : String(localized: "继续清理"))
+                    Text(title)
                         .font(.subheadline.weight(.semibold))
                     Text(target?.title ?? String(localized: "全部照片"))
                         .font(.subheadline)
@@ -461,7 +537,7 @@ struct LibraryHomeView: View {
         }
         .buttonStyle(.plain)
         .homeSurface(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .accessibilityLabel(String(localized: "\(resume.lastScope == nil ? String(localized: "开始整理") : String(localized: "继续清理"))，\(target?.title ?? String(localized: "全部照片"))，剩余 \(target?.remaining ?? unreviewedCount) 项"))
+        .accessibilityLabel(String(localized: "\(title)，\(target?.title ?? String(localized: "全部照片"))，剩余 \(target?.remaining ?? unreviewedCount) 项"))
         .accessibilityHint(String(localized: "打开尚未处理的照片"))
     }
 
@@ -472,9 +548,12 @@ struct LibraryHomeView: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "没有可访问的照片"))
+                Text(library.authorizationStatus == .limited
+                     ? String(localized: "没有可访问的照片") : String(localized: "图库中还没有照片或视频"))
                     .font(.headline)
-                Text(String(localized: "请在系统照片权限中选择要整理的照片"))
+                Text(library.authorizationStatus == .limited
+                     ? String(localized: "请在系统照片权限中选择要整理的照片")
+                     : String(localized: "拍摄或导入照片与视频后，就可以开始整理。"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -541,7 +620,7 @@ struct LibraryHomeView: View {
         .buttonStyle(.plain)
         .homeSurface(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .accessibilityLabel(String(localized: "待决定 \(pendingCount) 项"))
-        .accessibilityHint(String(localized: "打开待决定照片并重新选择"))
+        .accessibilityHint(String(localized: "打开待决定照片与视频并重新选择"))
     }
 
     private var monthSection: some View {
@@ -572,7 +651,8 @@ struct LibraryHomeView: View {
                 }
                 .font(.title3.weight(.semibold))
                 Spacer()
-                let hasMore = timeGrouping == .month ? monthBuckets.count > 6 : yearBuckets.count > 6
+                let timeBucketCount = timeGrouping == .month ? monthBuckets.count : yearBuckets.count
+                let hasMore = timeBucketCount > 6
                 if hasMore {
                     Button((timeGrouping == .month ? showingAllMonths : showingAllYears) ? String(localized: "收起") : String(localized: "展开全部")) {
                         if reduceMotion {
@@ -586,12 +666,13 @@ struct LibraryHomeView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .accessibilityLabel(String(localized: "展开或收起时间列表"))
-                } else {
+                } else if timeBucketCount == 6 {
                     Text(timeGrouping == .month ? String(localized: "最近 6 个月") : String(localized: "最近 6 年"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
+            .frame(height: usesExpandedHomeLayout ? 52 : nil, alignment: .center)
 
             if (timeGrouping == .month ? monthBuckets : yearBuckets).isEmpty {
                 Text(String(localized: "还没有可访问的照片"))
@@ -813,6 +894,49 @@ private enum TimeGrouping: Hashable {
 
 private typealias MonthBucket = LibraryTimeBucket
 
+private struct HomeReviewStatistics {
+    let unreviewedCount: Int
+    let reviewedCount: Int
+    let unreviewedMonthBuckets: [MonthBucket]
+}
+
+@MainActor
+private final class HomeReviewStatisticsCache {
+    private var assetRevision: Int?
+    private var reviewRevision: Int?
+    private var cached: HomeReviewStatistics?
+
+    func snapshot(library: PhotoLibraryService, reviews: ReviewStore) -> HomeReviewStatistics {
+        if assetRevision == library.assetRevision,
+           reviewRevision == reviews.revision,
+           let cached {
+            return cached
+        }
+
+        var unreviewedCount = 0
+        var reviewedCount = 0
+        for asset in library.assets {
+            switch reviews.decision(for: asset.localIdentifier) {
+            case nil: unreviewedCount += 1
+            case .keep, .delete: reviewedCount += 1
+            case .later: break
+            }
+        }
+        let unreviewedMonthBuckets = library.monthBuckets.filter { bucket in
+            bucket.assets.contains { reviews.decision(for: $0.localIdentifier) == nil }
+        }
+        let result = HomeReviewStatistics(
+            unreviewedCount: unreviewedCount,
+            reviewedCount: reviewedCount,
+            unreviewedMonthBuckets: unreviewedMonthBuckets
+        )
+        assetRevision = library.assetRevision
+        reviewRevision = reviews.revision
+        cached = result
+        return result
+    }
+}
+
 private struct CategoryEntry: Identifiable {
     let category: MediaCategory
     let count: Int
@@ -823,14 +947,17 @@ private struct StatPill: View {
     let title: String
     let value: Int
     let symbol: String
+    var showsTitle = true
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: symbol)
             Text("\(value)")
                 .monospacedDigit()
-            Text(title)
-                .foregroundStyle(.secondary)
+            if showsTitle {
+                Text(title)
+                    .foregroundStyle(.secondary)
+            }
         }
         .font(.caption.weight(.semibold))
         .padding(.horizontal, 10)
@@ -838,6 +965,7 @@ private struct StatPill: View {
         .frame(minHeight: 34)
         .homeSurface(in: Capsule())
         .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(value) \(title)")
     }
 }
 
@@ -908,6 +1036,7 @@ private struct CleanupTotalItem: View {
     let title: String
     let value: String
     let symbol: String
+    let minimumWidth: CGFloat
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -934,12 +1063,14 @@ private struct CleanupTotalItem: View {
                     Text(value)
                         .font(.headline.monospacedDigit())
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     Text(title)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
-                .frame(minWidth: 80, alignment: .leading)
+                .frame(minWidth: minimumWidth, alignment: .leading)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1048,16 +1179,18 @@ private struct CategoryCard: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Image(systemName: symbol)
                 .font(.title3)
-                .frame(width: 40, height: 40)
+                .frame(width: 36, height: 36)
                 .foregroundStyle(.primary)
                 .background(Color.primary.opacity(0.065), in: Circle())
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 Text(String(localized: "\(count) 项"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1068,7 +1201,7 @@ private struct CategoryCard: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(minHeight: 60)
-        .padding(14)
+        .padding(12)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .background(
             colorScheme == .dark ? Color.white.opacity(0.055) : Color.black.opacity(0.065),

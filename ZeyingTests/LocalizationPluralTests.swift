@@ -3,6 +3,19 @@ import Testing
 @testable import Zeying
 
 struct LocalizationPluralTests {
+    @Test("VoiceOver zoom and media identifiers interpolate in both languages")
+    func accessibilityInterpolation() throws {
+        let english = try languageBundle("en")
+        let chinese = try languageBundle("zh-Hans")
+        let scale = 200
+        #expect(String(localized: "缩放 \(scale)%", bundle: english, locale: Locale(identifier: "en")) == "Zoom 200%")
+        #expect(String(localized: "缩放 \(scale)%", bundle: chinese, locale: Locale(identifier: "zh-Hans")) == "缩放 200%")
+        let type = "Video"
+        let date = "2026/10/11 09:00"
+        let position = 2
+        #expect(String(localized: "\(type)，\(date)，第 \(position) 项", bundle: english, locale: Locale(identifier: "en"))
+                == "Video, 2026/10/11 09:00, item 2")
+    }
     @Test("中英文计数使用正确单复数", arguments: [1, 2])
     func countersUseLanguageAppropriateForms(_ count: Int) throws {
         let english = try languageBundle("en")

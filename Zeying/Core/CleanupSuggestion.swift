@@ -4,6 +4,14 @@ import Foundation
 enum SuggestionKind: String, Codable, CaseIterable, Sendable {
     case duplicates, similar, screenshots
 
+    var recommendedPriority: Int {
+        switch self {
+        case .duplicates: 0
+        case .similar: 1
+        case .screenshots: 2
+        }
+    }
+
     var title: String {
         switch self {
         case .duplicates: String(localized: "重复副本")
@@ -38,6 +46,19 @@ enum SuggestionReason: String, Codable, Sendable {
         case .olderDeliveries: String(localized: "超过 90 天的已送达物流信息，可逐张核对是否仍需保留")
         case .expiredOffers: String(localized: "超过 90 天的已过期或已使用优惠券，可逐张核对是否仍需保留")
         }
+    }
+}
+
+enum SuggestionRecommendedOrdering {
+    static func sorted(_ groups: [CleanupSuggestion], learning: SuggestionOrderLearning) -> [CleanupSuggestion] {
+        groups.enumerated().sorted { left, right in
+            if left.element.kind != right.element.kind {
+                return left.element.kind.recommendedPriority < right.element.kind.recommendedPriority
+            }
+            let a = learning.score(for: left.element.reason)
+            let b = learning.score(for: right.element.reason)
+            return a == b ? left.offset < right.offset : a > b
+        }.map(\.element)
     }
 }
 

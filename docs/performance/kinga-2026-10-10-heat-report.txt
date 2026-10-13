@@ -1,0 +1,87 @@
+Kinga 持续整理照片时发热分析 — 2026-10-10（北京时间）
+
+结论
+  当前明确的应用热点是主线程上的首页全库统计和界面更新。
+  用户在整理页操作时，首页仍在重新计算未处理和已决定数量。
+  同时采到运行时诊断/回溯符号查询的额外开销；有线充电也可能叠加热负担。
+  自动扫描仍在运行，但本段同步分析栈的 CPU 权重较小；不能把它认定为本次唯一或主要原因。
+  Fair 时只放慢扫描，Serious/Critical 才暂停，不能保证设备在摸起来热之前停止可选工作。
+
+采样条件
+  Kinga，iPhone 15 Pro Max，iOS 27.0 (24A435)，6 核 CPU。
+  场景由用户确认：连续整理照片、有线充电。
+  2026-10-10 20:04:04.389—20:04:50.235，45.846432 秒。
+  Time Profiler + Activity Monitor，附加已运行的 Swipick 进程 PID 1712。
+  应用 1.0 (1)，Debug；responsible process 为 debugserver (1714)。
+  Zeying.debug.dylib UUID B84FC666-E81F-38AC-BEF1-AE5ECBDCBD81。
+  与本机 Xcode DerivedData 中的 Debug 产物 UUID 一致。
+  未重新安装、重启应用或改变设备设置。
+
+实测
+  CPU 采样：17,883 个 Running 样本，估算 CPU 时间 17.883 秒。
+  CPU 平均 39.01%；进程 CPU 累计量对照估算 40.35%。
+  Activity Monitor 瞬时峰值 98.30%；完整一秒 CPU 采样窗口峰值约 77.5%。
+  这两种峰值来自不同时间窗口，不能混为一项。100% 表示一个核心，不是全机满载。
+  主线程 CPU 11.899 秒，占应用 CPU 采样权重 66.54%。
+  温度：整段 Fair，非人为模拟；这不是摄氏温度或机身表面测温。
+  potential-hangs：19 次，18 次约 250—268 毫秒，1 次约 735 毫秒。
+  停顿总计 5.339 秒，占记录约 11.65%；不等同于掉帧率。
+  停顿区间内主线程仍消耗约 5.281 秒 CPU，其中首页相关约 3.170 秒、首页统计约 2.930 秒。
+  内存 physical footprint：715.58—766.58 MiB，平均 748.02 MiB。
+  起始 749.41 MiB，结束 750.61 MiB；短时变化没有证明泄漏。
+  进程累计读量增加约 91.32 MiB，约 2.06 MiB/s；写入累计量未变化。
+  累计磁盘读量是进程统计，不能直接当作存储介质实际吞吐或归因到某一功能。
+
+原因与证据
+  1. 首页统计仍按界面更新全量遍历。
+     LibraryHomeView 的 CPU 栈约 4.59 秒，约占应用 CPU 权重 25.67%。
+     unreviewedCount 约 2.915 秒；reviewedCount 约 1.329 秒。
+     这些属于首页工作的一部分，不能再与首页 CPU 相加。
+     源码每次从 library.assets 过滤全库，同时读取 PHAsset.localIdentifier 和 ReviewRecord.decision。
+     首页在导航栈中被整理页覆盖后仍存在；采样证明它此时仍在执行 body 和统计。
+     ReviewStore 虽推迟发布 revision，但 decision(for:) 仍直接读取 SwiftData @Model。
+     推断：逐条模型观察与其他共享状态使隐藏首页重新计算，批量 revision 不能完全隔离这些依赖。
+     此热点同时出现在停顿区间，是本轮最明确的产品代码优化目标。
+
+  2. 调试/诊断工作放大了测试时的负担。
+     libRPAC.dylib 相关栈约 2.556 秒，约占应用 CPU 权重 14.29%。
+     主要是 __generateCulledBacktrace -> dladdr -> NListSymbolTable 查找。
+     这是观测到的运行时诊断开销；没有抓到对应的诊断消息，不能推断具体警告或 API 违规。
+     它与 Debug/采样环境有关，需要脱离调试器的 Release 对照才能区分正式使用成本。
+
+  3. 当前热策略保留了可选分析，有线充电的贡献尚未隔离。
+     Fair 时 effectiveDelay 为 600 毫秒，扫描降速但不停。
+     只有 Serious/Critical 才触发自动扫描暂停。
+     Nominal 时，充电将前台每项等待从 300 毫秒缩短到 120 毫秒。
+     本段一直 Fair，不能用“120 毫秒加速”解释本段的实际扫描速度。
+     同步 PhotoSuggestionAnalyzer 栈约 0.402 秒；这不包括全部 Vision 或系统异步工作。
+     充电会让 iPhone 变暖，持续计算可能叠加热量；当前没有不充电对照，无法量化充电占比。
+
+优先优化方向
+  第一优先：把首页计数改为增量维护或按明确版本缓存，避免 body 多次全库过滤。
+             整理时只更新必要的进度，首页不可见时延后统计，返回首页再刷新。
+             界面查询使用普通值类型的决定快照/索引，减少对每条 SwiftData 模型的观察。
+             图库、权限范围变化时重建，决定变更时增量更新；保留待决定与已决定的现有计数语义。
+  第二优先：Fair 即暂停可选扫描/美学评分，保留当前照片的交互与预览。
+             充电时不加快前台分析，稳定降温后再恢复，避免温度边界反复启停。
+  第三优先：在相同图库、操作顺序、亮度和相近起始温度下，比较脱离 Xcode 的 Release。
+             分别做充电/不充电、扫描开/暂停的对照，量化各部分贡献。
+  内存后续：当前约 750 MiB 仍偏高；用扫描结束、离开视频后的 Allocations 基线定位组成。
+
+测量边界
+  本次只做采样和分析，未修改应用实现。
+  Power Profiler 未取得有效功耗数据：attach 无法识别目标；All Processes 被 Location Energy Model 拒绝。
+  不据此报告瓦数、电池下降率或 GPU/ANE 功耗。
+  没有机身表面温度、FPS 或长时间内存记录；不能排除其他系统任务，也不能把本段视为正式版本基准。
+
+数据
+  docs/performance/kinga-2026-10-10-heat-metrics.json
+  /tmp/swipick-kinga-heat-20261010.trace
+  /tmp/swipick-kinga-heat-20261010-toc.xml
+  /tmp/swipick-kinga-heat-20261010-cpu.xml
+  /tmp/swipick-kinga-heat-20261010-live.xml
+
+Apple 参考
+  https://support.apple.com/en-sg/120619
+  https://support.apple.com/zh-cn/118431
+  https://developer.apple.com/documentation/xcode/diagnosing-performance-issues-early

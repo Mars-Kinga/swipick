@@ -260,6 +260,25 @@ final class ReviewStore {
         return true
     }
 
+    /// Cancels local Favorite changes without touching Favorites in Photos.
+    /// Each item remains reviewed as kept, including after relaunch.
+    @discardableResult
+    func cancelPendingFavorites(_ identifiers: [String]) -> Bool {
+        var changed = false
+        for identifier in Set(identifiers) {
+            guard let record = records[identifier], record.pendingFavorite else { continue }
+            record.decision = .keep
+            record.pendingFavorite = false
+            record.updatedAt = .now
+            changed = true
+        }
+        guard changed else { return true }
+        guard saveOrRollback() else { return false }
+        clearHistory()
+        revision += 1
+        return true
+    }
+
     /// Cancels staged deletions without changing the Photos library. Recovered
     /// assets remain reviewed as kept, including after the app is relaunched.
     @discardableResult

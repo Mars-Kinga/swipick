@@ -11,12 +11,16 @@ struct LivePhotoConversionJournalTests {
         let data = try JSONEncoder().encode(record)
         var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         object.removeValue(forKey: "verification")
+        object.removeValue(forKey: "favoriteCopyRequested")
+        object.removeValue(forKey: "sourcePendingFavorite")
         let legacyData = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(LivePhotoConversion.self, from: legacyData)
 
         #expect(decoded.stillIdentifier == "still-copy")
         #expect(decoded.phase == .awaitingOriginalDeletion)
         #expect(decoded.verification == .pending)
+        #expect(decoded.favoriteCopyRequested == false)
+        #expect(decoded.sourcePendingFavorite == false)
     }
 
     @Test("重开后保留失败或成功的核对结果", arguments: [
@@ -34,6 +38,28 @@ struct LivePhotoConversionJournalTests {
         #expect(reopened.journalError == nil)
         #expect(reopened.conversion(for: "source")?.verification == verification)
         #expect(reopened.conversion(for: "source")?.stillIdentifier == "still-copy")
+    }
+
+    @Test("静态副本收藏要求和待收藏意图随日志重开保留")
+    func favoriteIntentSurvivesReopen() throws {
+        let suite = "ConversionFavoriteIntentTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            try JSONEncoder().encode([
+                "source": sample(
+                    verification: .verified,
+                    favoriteCopyRequested: true,
+                    sourcePendingFavorite: true
+                )
+            ]),
+            forKey: "com.mars.zeying.liveConversionJournal.v1"
+        )
+
+        let reopened = LivePhotoConversionManager(defaults: defaults)
+        let record = try #require(reopened.conversion(for: "source"))
+        #expect(record.favoriteCopyRequested)
+        #expect(record.sourcePendingFavorite)
     }
 
     @Test("已加入待删除的转换只在清单出现，恢复后重新显示未完成转换")
@@ -59,14 +85,20 @@ struct LivePhotoConversionJournalTests {
         #expect(conversions.visiblePendingConversions(reviews: reviews).count == 1)
     }
 
-    private func sample(verification: LivePhotoConversion.Verification) -> LivePhotoConversion {
+    private func sample(
+        verification: LivePhotoConversion.Verification,
+        favoriteCopyRequested: Bool = false,
+        sourcePendingFavorite: Bool = false
+    ) -> LivePhotoConversion {
         LivePhotoConversion(
             sourceIdentifier: "source", token: UUID(),
             startedAt: Date(timeIntervalSince1970: 100),
             creationDate: Date(timeIntervalSince1970: 50),
             sourceModificationDate: nil, albumIdentifiers: ["family"],
             stillIdentifier: "still-copy", phase: .awaitingOriginalDeletion,
-            verification: verification
+            verification: verification,
+            favoriteCopyRequested: favoriteCopyRequested,
+            sourcePendingFavorite: sourcePendingFavorite
         )
     }
 }

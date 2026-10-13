@@ -93,8 +93,10 @@
 "已清理照片" = "Photos Deleted";
 "已清理视频" = "Videos Deleted";
 "已知资源大小" = "Known Size";
+"已清理大小" = "Cleaned Size";
 "已转为静态照片" = "Converted to Still";
 "开始整理" = "Start Reviewing";
+"开始清理" = "Start Reviewing";
 "当前只显示你允许择影访问的照片" = "Only photos you allow Swipick to access are shown";
 "当前只能整理已获准访问的照片。" = "Only photos currently accessible to Swipick can be organized.";
 "当前是有限照片权限。最终确认时只能整理已授权的照片。" = "Photos access is limited. Only authorized photos can be organized when you confirm.";
@@ -262,6 +264,7 @@
 "获取大小" = "Get Size";
 "视频" = "Videos";
 "视频预览" = "Video Preview";
+"视频信息" = "Video Details";
 "触觉反馈" = "Haptics";
 "设置" = "Settings";
 "请在系统照片权限中选择要整理的照片" = "Choose photos to organize in the system Photos permissions.";
@@ -341,7 +344,7 @@
 "有 %lld 条相簿整理记录暂时无法访问。" = "%lld pending album changes are currently unavailable.";
 "有 %lld 条本地处理记录当前无法在照片图库中找到。" = "%lld local review records could not be found in Photos.";
 "本组 %lld 张" = "%lld in this group";
-"查看清理统计，已清理 %lld 张照片、%lld 个视频，Live 转静态 %lld 张，已知资源大小 %@" = "Cleanup totals: %1$lld photos and %2$lld videos deleted; %3$lld Live Photos converted to stills; %4$@ of known resource sizes.";
+"查看清理统计，已清理 %lld 张照片、%lld 个视频，Live 转静态 %lld 张，已清理大小 %@" = "Cleanup totals: %1$lld photos and %2$lld videos deleted; %3$lld Live Photos converted to stills; cleaned size %4$@.";
 "检测到新出现的同名相簿“%@”。请返回照片审核页，重新选择这个已有相簿后再确认，避免重复创建。" = "A new album named “%@” appeared. Return to review, select the existing album, then confirm to avoid a duplicate.";
 "清单有 %lld 项待办" = "%lld items to confirm in the List";
 "清单有 %lld 项待办，%@" = "%1$lld items to confirm in the List: %2$@";
@@ -572,7 +575,7 @@
 "部分照片已无法访问，请跳过本组并更新建议。" = "Some photos are no longer accessible. Skip this group and update suggestions.";
 "保留 %lld 张，其余 %lld 张加入待删" = "Keep %1$lld · Mark %2$lld for deletion";
 "其余照片会进入清单，确认后才从图库删除。" = "The other photos go to the List. They are deleted from Photos only after you confirm.";
-"帮我选保留照片" = "Choose Keepers for Me";
+"帮我选照片" = "Choose Photos for Me";
 "先帮你选中建议保留的照片；没有建议时选第一张。不会提交决定。" = "Selects suggested keepers, or the first photo when no suggestion is available. This does not submit your decision.";
 "同一场景的不同瞬间，可以一起保留。" = "A different moment from the same scene, worth keeping together.";
 "本轮建议已审核" = "Suggested Review Complete";
@@ -629,6 +632,9 @@
 "静态照片已就绪。原件仍在图库中，可加入清单稍后删除。" = "The still photo is ready. Add the original Live Photo to the List to delete it later.";
 "正在加入待删除清单…" = "Adding to To Delete…";
 "正在完成转换…" = "Finishing conversion…";
+"正在检查原件…" = "Checking the original…";
+"检查原件状态" = "Check Original Status";
+"原实况照片仍在图库中，请在清单中确认删除" = "The original Live Photo is still in Photos. Confirm its deletion in the List.";
 "原实况照片加入待删除" = "Mark Live Photo for Deletion";
 "静态照片已就绪，可将原件加入待删除" = "Still photo ready; mark the original for deletion";
 "原实况照片 · 待删除" = "Live Original · To Delete";
@@ -692,7 +698,8 @@
 "没有匹配的相簿" = "No Matching Albums";
 "搜索相簿" = "Search Albums";
 "暂无本地预览" = "No Local Preview";
-"仍可继续作出决定" = "You can still make a decision";
+"请先查看照片，再决定如何处理。" = "View the photo before deciding what to do.";
+"点按查看大图。若仍无法显示，请先跳过本组。" = "Tap to open the full photo. If it still won't display, skip this group for now.";
 "实况照片加载失败" = "Live Photo Could Not Load";
 "重试播放" = "Retry Playback";
 "重试播放实况照片" = "Retry Live Photo Playback";
@@ -771,9 +778,13 @@
 
 "正在检查你的照片…" = "Checking Your Photos…";
 "正在检查你的照片… %d%%" = "Checking Your Photos… %d%%";
+"%d%%（%@/%@）" = "%d%% (%@/%@)";
+"等待继续检查…" = "Waiting to Continue…";
+"设备温度较高，检查稍后继续。" = "Paused While Device Is Warm.";
 "建议已可使用，仍在检查剩余照片。" = "Suggestions are ready. Checking remaining photos.";
 "正在检查剩余照片…" = "Checking remaining photos…";
 "已检查到 %d%%，等待继续。" = "Checked %d%%; waiting to continue.";
+"等待继续检查。后台检查由 iOS 安排。" = "Waiting to continue. iOS schedules background checking.";
 "最近一次后台检查：%@" = "Last background check: %@";
 "尚无后台执行记录；iOS 会安排后台检查，打开应用时也会继续。" = "No background run yet. iOS schedules it; checking also continues while the app is open.";
 "照片检查将在设备空闲时继续。" = "Photo checking will continue when your device is idle.";
@@ -868,3 +879,52 @@
 "建议排序" = "Sort Suggestions";
 "按时间 · 由早到晚" = "Oldest First";
 "按时间 · 由晚到早" = "Newest First";
+
+"自动分析清理建议" = "Automatically Analyze Suggestions";
+"清除建议分析数据" = "Clear Suggestion Analysis Data";
+"清除建议分析数据？" = "Clear Suggestion Analysis Data?";
+"清除后会暂停自动分析；再次开启时需要重新分析照片。" = "Clearing pauses automatic analysis. Turn it on again to analyze your photos from scratch.";
+"将删除本机生成的建议分析数据。照片、审核决定和清单不受影响。自动分析会暂停；再次开启后需要重新分析照片，可能耗时并消耗电量。" = "This removes locally generated suggestion analysis data. Your photos, review decisions, and List stay intact. Automatic analysis will pause. Turning it on again will reanalyze your photos, which may take time and use battery.";
+"无法清除建议分析数据" = "Couldn't Clear Suggestion Analysis Data";
+"默认使用缩略图；开启后下载当前原片，可能占用流量和空间。" = "Uses thumbnails by default. Turn on to download the current original, using data and storage.";
+"图库中还没有照片或视频" = "No Photos or Videos Yet";
+"拍摄或导入照片与视频后，就可以开始整理。" = "Take or import photos and videos to start organizing.";
+"打开待决定照片与视频并重新选择" = "Review undecided photos and videos";
+"收藏了的 Live 仍然要转吗？" = "Convert this favorited Live Photo?";
+"继续转换" = "Continue Conversion";
+"无法收藏静态副本：%@。原实况照片仍然保留，待删除清单未改变。" = "Could not favorite the still copy: %@. The original Live Photo is kept and pending deletions are unchanged.";
+"系统尚未确认静态副本已收藏" = "Photos has not confirmed that the still copy is favorited";
+"无法恢复待确认收藏。" = "Could not restore the pending favorite.";
+"无法找到与这张实况照片匹配的原始资源。" = "Could not find matching original resources for this Live Photo.";
+"无法读取这张实况照片的原始资源。" = "Could not read the original resources of this Live Photo.";
+"点击下载并播放" = "Download and Play";
+"重试 iCloud 预览" = "Retry iCloud Preview";
+"用下方按钮选择待删、保留或待决定" = "Use the buttons below to mark for deletion, keep, or set aside";
+"左滑待删、右滑保留、下滑待决定" = "Swipe left to mark for deletion, right to keep, down to set aside";
+"缩放 %lld%%" = "Zoom %lld%%";
+"恢复原始大小" = "Reset Zoom";
+"没有待决定照片或视频" = "No Undecided Photos or Videos";
+"审核时下滑或选择待决定，照片与视频会出现在这里。" = "Swipe down or choose Undecided while reviewing. Your photos and videos will appear here.";
+"待决定%@，%@" = "Undecided %@, %@";
+"预览待删除%@" = "Preview pending deletion: %@";
+"恢复待删除%@" = "Recover pending deletion: %@";
+"%@，%@，第 %lld 项" = "%@, %@, item %lld";
+"美学参考分 %@" = "Aesthetic score %@";
+"美学参考分 —" = "Aesthetic score —";
+"暂无美学参考分" = "No aesthetic score";
+"相似组可以参考美学参考分，选择保留一张或多张；建议不会自动删除照片。" = "Use the aesthetic score to choose one or more photos to keep. Suggestions never delete photos automatically.";
+"相似组可以选择保留一张或多张；建议不会自动删除照片。" = "Choose one or more photos to keep from a similar group. Suggestions never delete photos automatically.";
+"iCloud 照片默认使用缩略图，不自动下载原片。" = "iCloud photos use thumbnails by default. Originals are not downloaded automatically.";
+"上一张照片" = "Previous Photo";
+
+"从首页或底部导航进入。应用会自动在本机分析建议，可在设置关闭。" = "Open from Home or the bottom navigation. Suggestions are analyzed automatically on this device; turn this off in Settings.";
+
+"用下方按钮或滑动做决定，也可在设置开启更方便的侧边点按。iCloud 照片默认使用缩略图。" = "Use the buttons below or swipe to decide. Enable side taps in Settings if you prefer. iCloud photos use thumbnails by default.";
+"使用指南，第 %d 页，共 %d 页" = "User Guide, page %d of %d";
+"全部取消收藏" = "Unfavorite All";
+"全部不加入" = "Don't Add Any";
+"不加入相簿" = "Don't Add";
+"取消所有待收藏项目" = "Cancel all pending favorites";
+"取消所有待加入相簿项目" = "Cancel all pending album additions";
+"无法取消待收藏项目。" = "Could not cancel the pending Favorite changes.";
+"无法保留照片。" = "Could not keep the photo.";

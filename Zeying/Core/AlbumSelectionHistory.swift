@@ -1,6 +1,6 @@
 import Foundation
 
-struct PhotoAlbumOption: Identifiable, Hashable {
+struct PhotoAlbumOption: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
     /// PhotoKit can report an unavailable estimate; refreshing must not scan

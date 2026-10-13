@@ -9,48 +9,325 @@ struct SuggestionsView: View {
     let albumService: PhotoAlbumService
     let albumAssignments: PendingAlbumAssignmentStore
     let showsBackToHome: Bool
+    let isFullScreenReview: Bool
     let onBackToHome: () -> Void
 
     @Environment(PhotoSuggestionService.self) private var suggestions
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.zeyingFoldedPortraitHeaderInset) private var foldedPortraitHeaderInset
     @Environment(\.scenePhase) private var scenePhase
     @State private var filter: SuggestionKind?
     @State private var isVisible = false
     @State private var shuffledGroupIDs: [String] = []
     @State private var showingSuggestionInfo = false
+    @State private var selectedGroupID: String?
+    @State private var paneUndoState = SuggestionPaneUndoState.hidden
+    @State private var paneUndoRequest = 0
+    @State private var paneSkipRequest = 0
     @AppStorage("com.mars.zeying.suggestionListOrder.v1") private var listOrderRaw = SuggestionListOrder.recommended.rawValue
 
     private var listOrder: SuggestionListOrder {
         SuggestionListOrder(rawValue: listOrderRaw) ?? .recommended
     }
 
+    private var usesFoldAwareSplit: Bool {
+        if #available(iOS 27.1, *), horizontalSizeClass == .regular { true }
+        else { false }
+    }
+
+    private var usesNativeExpandedToolbar: Bool {
+        UIDevice.current.userInterfaceIdiom == .phone &&
+            (horizontalSizeClass == .regular || verticalSizeClass == .compact)
+    }
+
+    private var usesFoldedPortraitToolbar: Bool {
+        UIDevice.current.userInterfaceIdiom == .phone && foldedPortraitHeaderInset > 0
+    }
+
     private var groups: [CleanupSuggestion] {
         let source = suggestions.availableGroups(library: library, reviews: reviews)
-        let positions = Dictionary(uniqueKeysWithValues: shuffledGroupIDs.enumerated().map { ($0.element, $0.offset) })
-        return source.enumerated().sorted { left, right in
-            if !shuffledGroupIDs.isEmpty {
-                let a = positions[left.element.id] ?? Int.max
-                let b = positions[right.element.id] ?? Int.max
-                if a != b { return a < b }
-            }
-            switch listOrder {
-            case .recommended:
-                let a = Double(categoryRank(left.element.kind)) - suggestions.orderLearning.score(for: left.element.reason)
-                let b = Double(categoryRank(right.element.kind)) - suggestions.orderLearning.score(for: right.element.reason)
-                return a == b ? left.offset < right.offset : a < b
-            case .oldestFirst, .newestFirst:
+        let ordered: [CleanupSuggestion]
+        switch listOrder {
+        case .recommended:
+            ordered = SuggestionRecommendedOrdering.sorted(source, learning: suggestions.orderLearning)
+        case .oldestFirst, .newestFirst:
+            ordered = source.enumerated().sorted { left, right in
                 if left.element.newestDate != right.element.newestDate {
                     guard let leftDate = left.element.newestDate else { return false }
                     guard let rightDate = right.element.newestDate else { return true }
                     return listOrder == .oldestFirst ? leftDate < rightDate : leftDate > rightDate
                 }
                 return left.offset < right.offset
-            }
+            }.map(\.element)
+        }
+        guard !shuffledGroupIDs.isEmpty else { return ordered }
+        let positions = Dictionary(uniqueKeysWithValues: shuffledGroupIDs.enumerated().map { ($0.element, $0.offset) })
+        return ordered.enumerated().sorted { left, right in
+            let first = positions[left.element.id] ?? Int.max
+            let second = positions[right.element.id] ?? Int.max
+            return first == second ? left.offset < right.offset : first < second
         }.map(\.element)
     }
     var body: some View {
         let allGroups = groups
         let filteredGroups = allGroups.filter { filter == nil || $0.kind == filter }
+        let expanded = foldedPortraitHeaderInset == 0 &&
+            (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
+        Group {
+            if expanded {
+                ZeyingFoldAwareSplit(divisionFill: Color(uiColor: .systemGroupedBackground)) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ZeyingRootPageTitle(
+                            title: String(localized: "清理建议"),
+                            matchesHomeExpandedPosition: true
+                        )
+                        suggestionList(allGroups: allGroups, filteredGroups: filteredGroups, expanded: true)
+                    }
+                    .padding(.top, usesNativeExpandedToolbar ? -16 : 0)
+                    .frame(minWidth: 310, idealWidth: usesFoldAwareSplit ? nil : 380,
+                           maxWidth: usesFoldAwareSplit ? .infinity : 460,
+                           maxHeight: .infinity, alignment: .topLeading)
+                    .background(Color(uiColor: .systemGroupedBackground)
+                        .ignoresSafeArea(.container, edges: [.top, .leading]))
+                } trailing: {
+                    Group {
+                        if let selected = filteredGroups.first(where: { $0.id == selectedGroupID }) ?? filteredGroups.first {
+                            session(filteredGroups, startingAt: selected, selection: $selectedGroupID,
+                                    paneUndoState: $paneUndoState, paneUndoRequest: paneUndoRequest,
+                                    paneSkipRequest: paneSkipRequest)
+                                .environment(\.horizontalSizeClass, .compact)
+                                .environment(\.reviewInNarrowPane, true)
+                        } else {
+                            emptyContent
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .background(Color(uiColor: .systemBackground)
+                        .ignoresSafeArea(.container, edges: [.top, .trailing, .bottom]))
+                    .overlay(alignment: .topTrailing) {
+                        if !usesNativeExpandedToolbar {
+                            floatingExpandedToolbar(allGroups: allGroups, filteredGroups: filteredGroups)
+                                .padding(.trailing, 20)
+                                .padding(.top, 12)
+                        }
+                    }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    compactHeader(allGroups: allGroups)
+                    suggestionList(allGroups: allGroups, filteredGroups: filteredGroups, expanded: false)
+                }
+                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+            }
+        }
+        .navigationTitle("")
+        .toolbar((usesNativeExpandedToolbar && expanded) || usesFoldedPortraitToolbar
+                 ? .visible : .hidden, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if isFullScreenReview {
+                    EmptyView()
+                } else if usesNativeExpandedToolbar && expanded {
+                    if !filteredGroups.isEmpty && paneUndoState.isVisible {
+                        Button {
+                            paneUndoRequest += 1
+                        } label: {
+                            Image(systemName: "arrow.uturn.backward")
+                        }
+                        .disabled(!paneUndoState.isEnabled)
+                        .accessibilityLabel(paneUndoState.title)
+                    }
+                    shuffleButton(allGroups: allGroups)
+                    if let currentGroupID = (filteredGroups.first { $0.id == selectedGroupID } ?? filteredGroups.first)?.id {
+                        NavigationLink(value: SuggestionSessionDestination(groupID: currentGroupID)) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        }
+                        .accessibilityLabel(String(localized: "全屏审核当前建议组"))
+                    }
+                    suggestionOptionsMenu
+                    if !filteredGroups.isEmpty {
+                        Button {
+                            paneSkipRequest += 1
+                        } label: {
+                            Image(systemName: "forward.end")
+                        }
+                        .accessibilityLabel(String(localized: "跳过本组"))
+                    }
+                } else if usesFoldedPortraitToolbar {
+                    shuffleButton(allGroups: allGroups)
+                    suggestionOptionsMenu
+                }
+            }
+        }
+        .navigationDestination(for: SuggestionSessionDestination.self) { destination in
+            let visibleGroups = groups.filter { filter == nil || $0.kind == filter }
+            session(visibleGroups, startingAt: visibleGroups.first { $0.id == destination.groupID })
+        }
+        .task(id: library.revision) { suggestions.startIfNeeded(library: library, reviews: reviews) }
+        .onAppear { isVisible = true }
+        .onChange(of: listOrderRaw) { _, _ in shuffledGroupIDs.removeAll() }
+        .onChange(of: filter) { _, _ in selectedGroupID = nil }
+        .onChange(of: filteredGroups.map(\.id)) { previousIDs, visibleIDs in
+            if let selectedGroupID, !visibleIDs.contains(selectedGroupID) {
+                let previousIndex = previousIDs.firstIndex(of: selectedGroupID) ?? 0
+                self.selectedGroupID = visibleIDs.isEmpty ? nil : visibleIDs[min(previousIndex, visibleIDs.count - 1)]
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active && isVisible { suggestions.startIfNeeded(library: library, reviews: reviews) }
+        }
+        .onDisappear { isVisible = false }
+        .alert(String(localized: "关于建议"), isPresented: $showingSuggestionInfo) {
+            Button(String(localized: "知道了"), role: .cancel) {}
+        } message: {
+            Text(suggestionDetails)
+        }
+    }
+
+    private func compactHeader(allGroups: [CleanupSuggestion]) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            if showsBackToHome {
+                Button(action: onBackToHome) {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(String(localized: "返回首页"))
+                .zeyingGlass(in: Circle())
+            }
+
+            Text(String(localized: "清理建议"))
+                .font(.largeTitle.weight(.bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(height: 44, alignment: .center)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityAddTraits(.isHeader)
+
+            if !usesFoldedPortraitToolbar {
+                HStack(spacing: 8) {
+                    shuffleButton(allGroups: allGroups)
+                        .frame(width: 44, height: 44)
+                        .zeyingGlass(in: Circle())
+                    suggestionOptionsMenu
+                        .frame(width: 44, height: 44)
+                        .zeyingGlass(in: Circle())
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
+        .font(.title3)
+        .buttonStyle(.plain)
+    }
+
+    private func expandedToolbar(allGroups: [CleanupSuggestion],
+                                 filteredGroups: [CleanupSuggestion]) -> some View {
+        return HStack(spacing: 4) {
+            if !filteredGroups.isEmpty && paneUndoState.isVisible {
+                Button {
+                    paneUndoRequest += 1
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .frame(width: 44, height: 44)
+                }
+                .disabled(!paneUndoState.isEnabled)
+                .accessibilityLabel(paneUndoState.title)
+            }
+            if showsBackToHome {
+                Button(action: onBackToHome) {
+                    Image(systemName: "house").frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(String(localized: "返回首页"))
+            }
+            shuffleButton(allGroups: allGroups)
+                .frame(width: 44, height: 44)
+            if let currentGroupID = (filteredGroups.first { $0.id == selectedGroupID } ?? filteredGroups.first)?.id {
+                NavigationLink(value: SuggestionSessionDestination(groupID: currentGroupID)) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(String(localized: "全屏审核当前建议组"))
+            }
+            suggestionOptionsMenu
+                .frame(width: 44, height: 44)
+            if !filteredGroups.isEmpty {
+                Button {
+                    paneSkipRequest += 1
+                } label: {
+                    Image(systemName: "forward.end").frame(width: 44, height: 44)
+                }
+                .accessibilityLabel(String(localized: "跳过本组"))
+            }
+        }
+        .font(.title2)
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func floatingExpandedToolbar(allGroups: [CleanupSuggestion],
+                                         filteredGroups: [CleanupSuggestion]) -> some View {
+        if #available(iOS 26.0, *) {
+            expandedToolbar(allGroups: allGroups, filteredGroups: filteredGroups)
+                .glassEffect(.clear, in: Capsule())
+        } else {
+            expandedToolbar(allGroups: allGroups, filteredGroups: filteredGroups)
+                .background(.ultraThinMaterial, in: Capsule())
+        }
+    }
+
+    private var suggestionOptionsMenu: some View {
+        Menu {
+            Button(String(localized: "关于建议"), systemImage: "info.circle") {
+                showingSuggestionInfo = true
+            }
+            if suggestions.isScanning {
+                Button(String(localized: "暂停分析"), systemImage: "pause") { suggestions.pause(manually: true) }
+            } else {
+                Button(String(localized: "更新建议"), systemImage: "arrow.clockwise") {
+                    suggestions.start(library: library, reviews: reviews)
+                }
+            }
+            if !suggestions.skippedIDs.isEmpty {
+                Button(String(localized: "恢复已跳过的建议"), systemImage: "arrow.uturn.backward") { suggestions.restoreSkipped() }
+            }
+            if suggestions.orderLearning.hasHistory {
+                Button(String(localized: "重置建议顺序"), systemImage: "arrow.counterclockwise") {
+                    suggestions.resetOrderLearning()
+                }
+            }
+        } label: { Image(systemName: "ellipsis") }
+        .accessibilityLabel(String(localized: "建议选项"))
+    }
+
+    private func shuffleButton(allGroups: [CleanupSuggestion]) -> some View {
+        Button {
+            withAnimation(reduceMotion ? nil : .snappy) {
+                if shuffledGroupIDs.isEmpty {
+                    let original = allGroups.map(\.id)
+                    var shuffled = original.shuffled()
+                    if shuffled == original, shuffled.count >= 2 { shuffled.swapAt(0, 1) }
+                    shuffledGroupIDs = shuffled
+                } else {
+                    shuffledGroupIDs.removeAll()
+                }
+            }
+        } label: {
+            Image(systemName: shuffledGroupIDs.isEmpty ? "shuffle" : "arrow.up.arrow.down")
+        }
+        .disabled(shuffledGroupIDs.isEmpty && allGroups.count < 2)
+        .accessibilityLabel(String(localized: shuffledGroupIDs.isEmpty ? "随机排列建议" : "恢复推荐顺序"))
+    }
+
+    private func suggestionList(allGroups: [CleanupSuggestion], filteredGroups: [CleanupSuggestion],
+                                expanded: Bool) -> some View {
+        let firstGroupID = filteredGroups.first?.id
+        let selectedRowID = selectedGroupID ?? firstGroupID
         let resumedGroups: [CleanupSuggestion] = {
             guard shuffledGroupIDs.isEmpty, listOrder == .recommended else { return [] }
             let lookup = Dictionary(uniqueKeysWithValues: filteredGroups.map { ($0.id, $0) })
@@ -59,15 +336,22 @@ struct SuggestionsView: View {
         let visiblePhotoCount = Set(allGroups.flatMap {
             suggestions.visibleAssetIDs(in: $0, library: library, reviews: reviews)
         }).count
-        List {
+        let scanComplete = suggestions.displayedProgress.percentage(complete: suggestions.hasScanned) == 100
+        let showsScanStatus = !scanComplete && (suggestions.isScanning || suggestions.isManuallyPaused ||
+            suggestions.isEnergyPaused || !suggestions.hasScanned)
+        return List {
             Section {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: showsScanStatus ? 4 : 0) {
                     Text(String(localized: "\(allGroups.count) 组建议 · \(visiblePhotoCount) 张照片"))
-                        .font(.headline)
+                        .font(.subheadline.weight(.bold))
                         .monospacedDigit()
-                    SuggestionScanStatusView(library: library, reviews: reviews)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if showsScanStatus {
+                        SuggestionScanStatusView(library: library, reviews: reviews, isVisible: isVisible)
+                    }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, showsScanStatus ? 4 : 2)
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             }
 
             Section {
@@ -82,15 +366,31 @@ struct SuggestionsView: View {
                     emptyContent
                         .listRowBackground(Color.clear)
                 } else {
-                    ForEach(filteredGroups) { group in
-                        NavigationLink {
-                            session(filteredGroups, startingAt: group)
-                        } label: {
-                            SuggestionRow(group: group, library: library, reviews: reviews)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(String(localized: "跳过"), systemImage: "forward.end") { suggestions.skip(group) }
-                                .tint(.secondary)
+                    // SwiftUI otherwise compares the entire array of large group
+                    // values while diffing the list, including when switching tabs.
+                    ForEach(filteredGroups.map(\.id), id: \.self) { groupID in
+                        if let group = suggestions.groups.first(where: { $0.id == groupID }) {
+                            Group {
+                                if expanded {
+                                    Button { selectedGroupID = groupID } label: {
+                                        SuggestionRow(group: group, library: library, reviews: reviews)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .listRowBackground(selectedRowID == groupID
+                                        ? Color.accentColor.opacity(0.12) : Color.clear)
+                                    .accessibilityAddTraits(selectedRowID == groupID ? .isSelected : [])
+                                } else {
+                                    NavigationLink(value: SuggestionSessionDestination(groupID: groupID)) {
+                                        SuggestionRow(group: group, library: library, reviews: reviews)
+                                    }
+                                }
+                            }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(String(localized: "跳过"), systemImage: "forward.end") { suggestions.skip(group) }
+                                    .tint(.secondary)
+                            }
                         }
                     }
                 }
@@ -107,61 +407,12 @@ struct SuggestionsView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .contentMargins(.top, 0, for: .scrollContent)
         .listSectionSpacing(0)
-        .navigationTitle(String(localized: "清理建议"))
-        .navigationBarTitleDisplayMode(.large)
-        .toolbar {
-            ToolbarItemGroup(placement: .topBarLeading) {
-                if showsBackToHome {
-                    Button(action: onBackToHome) {
-                        Image(systemName: "chevron.left")
-                    }
-                    .accessibilityLabel(String(localized: "返回首页"))
-                }
-                Button {
-                    withAnimation(reduceMotion ? nil : .snappy) {
-                        if shuffledGroupIDs.isEmpty {
-                            let original = allGroups.map(\.id)
-                            var shuffled = original.shuffled()
-                            if shuffled == original, shuffled.count >= 2 { shuffled.swapAt(0, 1) }
-                            shuffledGroupIDs = shuffled
-                        } else {
-                            shuffledGroupIDs.removeAll()
-                        }
-                    }
-                } label: { Image(systemName: shuffledGroupIDs.isEmpty ? "shuffle" : "arrow.up.arrow.down") }
-                .disabled(shuffledGroupIDs.isEmpty && allGroups.count < 2)
-                .accessibilityLabel(String(localized: shuffledGroupIDs.isEmpty ? "随机排列建议" : "恢复推荐顺序"))
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button(String(localized: "关于建议"), systemImage: "info.circle") {
-                        showingSuggestionInfo = true
-                    }
-                    if suggestions.isScanning {
-                        Button(String(localized: "暂停分析"), systemImage: "pause") { suggestions.pause(manually: true) }
-                    } else {
-                        Button(String(localized: "更新建议"), systemImage: "arrow.clockwise") {
-                            suggestions.start(library: library, reviews: reviews)
-                        }
-                    }
-                    if !suggestions.skippedIDs.isEmpty {
-                        Button(String(localized: "恢复已跳过的建议"), systemImage: "arrow.uturn.backward") { suggestions.restoreSkipped() }
-                    }
-                    if suggestions.orderLearning.hasHistory {
-                        Button(String(localized: "重置建议顺序"), systemImage: "arrow.counterclockwise") {
-                            suggestions.resetOrderLearning()
-                        }
-                    }
-                } label: { Image(systemName: "ellipsis") }
-                .accessibilityLabel(String(localized: "建议选项"))
-            }
-        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !filteredGroups.isEmpty {
-                NavigationLink {
-                    session(filteredGroups, startingAt: resumedGroups.first)
-                } label: {
+            if !expanded && !filteredGroups.isEmpty {
+                NavigationLink(value: SuggestionSessionDestination(
+                    groupID: resumedGroups.first?.id ?? firstGroupID ?? "")) {
                     Label(String(localized: resumedGroups.isEmpty ? "开始整理" : "继续整理"), systemImage: "play.fill")
                         .font(.headline)
                         .foregroundStyle(Color(uiColor: .systemBackground))
@@ -174,18 +425,6 @@ struct SuggestionsView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             }
-        }
-        .task(id: library.revision) { suggestions.startIfNeeded(library: library, reviews: reviews) }
-        .onAppear { isVisible = true }
-        .onChange(of: listOrderRaw) { _, _ in shuffledGroupIDs.removeAll() }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active && isVisible { suggestions.startIfNeeded(library: library, reviews: reviews) }
-        }
-        .onDisappear { isVisible = false }
-        .alert(String(localized: "关于建议"), isPresented: $showingSuggestionInfo) {
-            Button(String(localized: "知道了"), role: .cancel) {}
-        } message: {
-            Text(suggestionDetails)
         }
     }
 
@@ -284,14 +523,6 @@ struct SuggestionsView: View {
         }
     }
 
-    private func categoryRank(_ kind: SuggestionKind) -> Int {
-        switch kind {
-        case .similar: 0
-        case .screenshots: 1
-        case .duplicates: 2
-        }
-    }
-
     private var categoryExplanation: String {
         switch filter {
         case nil:
@@ -349,11 +580,21 @@ struct SuggestionsView: View {
         }
     }
 
-    private func session(_ groups: [CleanupSuggestion], startingAt group: CleanupSuggestion? = nil) -> some View {
+    private func session(_ groups: [CleanupSuggestion], startingAt group: CleanupSuggestion? = nil,
+                         selection: Binding<String?>? = nil,
+                         paneUndoState: Binding<SuggestionPaneUndoState>? = nil,
+                         paneUndoRequest: Int? = nil, paneSkipRequest: Int? = nil) -> some View {
         SuggestedReviewSessionView(groups: groups, startingAt: group,
                                    library: library, reviews: reviews, sizes: sizes,
-                                   albumService: albumService, albumAssignments: albumAssignments)
+                                   albumService: albumService, albumAssignments: albumAssignments,
+                                   selection: selection,
+                                   paneUndoState: paneUndoState, paneUndoRequest: paneUndoRequest,
+                                   paneSkipRequest: paneSkipRequest)
     }
+}
+
+private struct SuggestionSessionDestination: Hashable {
+    let groupID: String
 }
 
 private enum SuggestionListOrder: String, CaseIterable {
@@ -371,43 +612,50 @@ private enum SuggestionListOrder: String, CaseIterable {
 private struct SuggestionScanStatusView: View {
     let library: PhotoLibraryService
     let reviews: ReviewStore
+    let isVisible: Bool
     @Environment(PhotoSuggestionService.self) private var suggestions
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var reportsLiveProgress: Bool { isVisible && scenePhase == .active }
+
+    private var statusTitle: String? {
+        if suggestions.isScanning { return String(localized: "正在检查你的照片…") }
+        if suggestions.isManuallyPaused { return String(localized: "照片检查已暂停。") }
+        if suggestions.isEnergyPaused { return String(localized: "设备温度较高，检查稍后继续。") }
+        if !suggestions.hasScanned { return String(localized: "等待继续检查…") }
+        return nil
+    }
 
     var body: some View {
-        Group {
-            if suggestions.isScanning {
-                if (suggestions.scanProgressPercent ?? 0) >= 99 {
-                    Text(String(localized: suggestions.groups.isEmpty
-                        ? "正在检查剩余照片…" : "建议已可使用，仍在检查剩余照片。"))
-                        .font(.subheadline).foregroundStyle(.secondary)
-                } else if let percent = suggestions.scanProgressPercent {
-                    Text(String(format: String(localized: "正在检查你的照片… %d%%"), percent))
-                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-                } else {
-                    Text(String(localized: "正在检查你的照片…"))
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-            } else if suggestions.isManuallyPaused {
-                Text(String(localized: "照片检查已暂停。"))
-                    .font(.subheadline).foregroundStyle(.secondary)
-                Button(String(localized: "继续分析"), systemImage: "play") {
-                    suggestions.start(library: library, reviews: reviews)
-                }
-                .font(.subheadline)
-            } else if suggestions.isEnergyPaused {
-                Text(String(localized: "设备温度较高，降温后会继续检查照片。"))
-                    .font(.subheadline).foregroundStyle(.secondary)
-            } else if !suggestions.hasScanned {
-                if let percent = suggestions.scanProgressPercent, percent > 0 {
-                    Text(String(format: String(localized: "已检查到 %d%%，等待继续。"), percent))
-                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-                }
+        let progress = suggestions.displayedProgress
+        let percent = progress.percentage(complete: suggestions.hasScanned)
+        let progressDetail = percent.flatMap { value -> String? in
+            guard progress.total > 0, value < 100 else { return nil }
+            return String(format: String(localized: "%d%%（%@/%@）"), value,
+                          progress.checked.formatted(), progress.total.formatted())
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            if let statusTitle {
+                Text(verbatim: statusTitle + (progressDetail.map { " \($0)" } ?? ""))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            if suggestions.isManuallyPaused ||
+                (!suggestions.isScanning && !suggestions.isEnergyPaused && !suggestions.hasScanned) {
                 Button(String(localized: "继续分析"), systemImage: "play") {
                     suggestions.start(library: library, reviews: reviews)
                 }
                 .font(.subheadline)
             }
         }
+        .onChange(of: reportsLiveProgress, initial: true) { _, visible in
+            suggestions.setProgressVisible(visible)
+        }
+        .onAppear { suggestions.setProgressVisible(reportsLiveProgress) }
+        .onDisappear { suggestions.setProgressVisible(false) }
     }
 }
 

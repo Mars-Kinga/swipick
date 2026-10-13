@@ -16,6 +16,8 @@ struct LivePhotoConversionSheet: View {
     @State private var progressMessage: String?
     @State private var errorMessage: String?
     @State private var showingCancelConfirmation = false
+    @State private var showingFavoriteConversionConfirmation = false
+    @State private var favoriteConfirmationStagesOriginal = false
     @State private var operationTask: Task<Void, Never>?
     @State private var canCancelPreparation = false
 
@@ -32,6 +34,17 @@ struct LivePhotoConversionSheet: View {
     private var still: PHAsset? {
         guard let identifier = record?.stillIdentifier else { return nil }
         return library.asset(with: identifier)
+    }
+
+    private var copyShouldBeFavorite: Bool {
+        record?.favoriteCopyRequested == true ||
+            source?.isFavorite == true ||
+            reviews.isPendingFavorite(sourceIdentifier)
+    }
+
+    private var needsFavoriteConversionConfirmation: Bool {
+        guard let source else { return false }
+        return (source.isFavorite || reviews.isPendingFavorite(sourceIdentifier)) && record?.favoriteCopyRequested != true
     }
 
     var body: some View {
@@ -86,6 +99,24 @@ struct LivePhotoConversionSheet: View {
             } message: {
                 Text(String(localized: "系统可能再次要求确认。原实况照片会保留。"))
             }
+            .confirmationDialog(
+                String(localized: "收藏了的 Live 仍然要转吗？"),
+                isPresented: $showingFavoriteConversionConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button(String(localized: "继续转换")) {
+                    let stageForDeletion = favoriteConfirmationStagesOriginal
+                    favoriteConfirmationStagesOriginal = false
+                    launchPreparation(
+                        stageForDeletion: stageForDeletion,
+                        favoriteCopyRequested: true,
+                        sourcePendingFavorite: reviews.isPendingFavorite(sourceIdentifier)
+                    )
+                }
+                Button(String(localized: "取消"), role: .cancel) {
+                    favoriteConfirmationStagesOriginal = false
+                }
+            }
             .alert(String(localized: "操作未完成"), isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -101,6 +132,7 @@ struct LivePhotoConversionSheet: View {
                     }
                     if let record,
                        source != nil,
+                       !needsFavoriteConversionConfirmation,
                        (record.phase == .preparing ||
                         (record.stillIdentifier != nil && record.verification != .verified)) {
                         let task = Task { await prepareCopy(stageForDeletion: false) }
@@ -110,7 +142,7 @@ struct LivePhotoConversionSheet: View {
                 }
             }
             .onAppear {
-                if record == nil, let source {
+                if record == nil, let source, !needsFavoriteConversionConfirmation {
                     conversions.prewarmStill(for: source)
                 }
             }
@@ -178,16 +210,8 @@ struct LivePhotoConversionSheet: View {
 
     private var preparationAction: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                Label(String(localized: "保留拍摄时间和相簿"), systemImage: "checkmark.circle")
-                Label(String(localized: "不保留动态片段和编辑历史"), systemImage: "livephoto.slash")
-                Label(String(localized: "在“最近添加”中按新导入时间排列"), systemImage: "clock")
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-
             Button {
-                launchPreparation(stageForDeletion: true)
+                requestPreparation(stageForDeletion: true)
             } label: {
                 Label(record == nil ? String(localized: "转为静态照片") : String(localized: "重新尝试转换"), systemImage: "photo.badge.plus")
                     .frame(maxWidth: .infinity)
@@ -204,7 +228,7 @@ struct LivePhotoConversionSheet: View {
         VStack(spacing: 12) {
             if record?.verification == .failed, source != nil {
                 Button(String(localized: "重新核对静态照片"), systemImage: "arrow.clockwise") {
-                    launchPreparation(stageForDeletion: false)
+                    requestPreparation(stageForDeletion: false)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -213,13 +237,13 @@ struct LivePhotoConversionSheet: View {
             } else {
                 Button {
                     if record?.phase == .originalDeleted || source == nil {
-                        launchDeleteOriginal()
+                        launchStageOrFinishOriginal()
                     } else {
-                        launchStageOriginal()
+                        requestPreparation(stageForDeletion: true)
                     }
                 } label: {
                     Label(record?.phase == .originalDeleted ? String(localized: "完成本地记录") :
-                          source == nil ? String(localized: "完成转换") : String(localized: "原实况照片加入待删除"),
+                          source == nil ? String(localized: "检查原件状态") : String(localized: "原实况照片加入待删除"),
                           systemImage: "checkmark.circle")
                     .frame(maxWidth: .infinity)
                 }
@@ -244,14 +268,25 @@ struct LivePhotoConversionSheet: View {
         }
     }
 
-    private func prepareCopy(stageForDeletion: Bool) async {
+    private func prepareCopy(
+        stageForDeletion: Bool,
+        favoriteCopyRequested: Bool? = nil,
+        sourcePendingFavorite: Bool? = nil
+    ) async {
         guard let source else { return }
+        let shouldFavoriteCopy = favoriteCopyRequested ?? copyShouldBeFavorite
+        let pendingFavorite = sourcePendingFavorite ?? reviews.isPendingFavorite(sourceIdentifier)
         operationPreviewAsset = source
         isBusy = true
         canCancelPreparation = true
         progressMessage = String(localized: "正在创建静态照片…")
         do {
-            _ = try await conversions.prepare(asset: source, library: library)
+            _ = try await conversions.prepare(
+                asset: source,
+                library: library,
+                favoriteCopyRequested: shouldFavoriteCopy,
+                sourcePendingFavorite: pendingFavorite
+            )
             // Once PhotoKit has created the copy, keep the task alive long
             // enough for the manager to persist its identifier. Cancellation
             // here leaves the verified copy in the journal for a later retry.
@@ -284,17 +319,30 @@ struct LivePhotoConversionSheet: View {
         operationPreviewAsset = nil
     }
 
-    private func deleteOriginal() async {
+    private func stageOrFinishOriginal() async {
         operationPreviewAsset = still ?? source
         isBusy = true
-        progressMessage = String(localized: "正在完成转换…")
+        progressMessage = String(localized: "正在检查原件…")
         do {
-            try await conversions.deleteOriginal(
-                sourceIdentifier: sourceIdentifier,
-                library: library,
-                reviews: reviews,
-                albumAssignments: albumAssignments
-            )
+            if record?.phase == .originalDeleted {
+                try await conversions.finishMissingOriginal(
+                    sourceIdentifier: sourceIdentifier, library: library,
+                    reviews: reviews, albumAssignments: albumAssignments
+                )
+            } else {
+                do {
+                    try conversions.stageOriginalForDeletion(
+                        sourceIdentifier: sourceIdentifier, reviews: reviews
+                    )
+                } catch LivePhotoConversionError.originalUnavailable {
+                    // The library snapshot may be stale. If Photos itself no
+                    // longer has the original, only finish the local journal.
+                    try await conversions.finishMissingOriginal(
+                        sourceIdentifier: sourceIdentifier, library: library,
+                        reviews: reviews, albumAssignments: albumAssignments
+                    )
+                }
+            }
             dismiss()
             onFinished?()
         } catch {
@@ -303,23 +351,6 @@ struct LivePhotoConversionSheet: View {
         progressMessage = nil
         isBusy = false
         operationPreviewAsset = nil
-    }
-
-    private func stageOriginal() {
-        isBusy = true
-        progressMessage = String(localized: "正在加入待删除清单…")
-        do {
-            try conversions.stageOriginalForDeletion(
-                sourceIdentifier: sourceIdentifier,
-                reviews: reviews
-            )
-            dismiss()
-            onFinished?()
-        } catch {
-            errorMessage = PhotosFailureMessage.message(for: error)
-        }
-        progressMessage = nil
-        isBusy = false
     }
 
     private func deleteStillCopy() async {
@@ -339,19 +370,34 @@ struct LivePhotoConversionSheet: View {
         operationPreviewAsset = nil
     }
 
-    private func launchPreparation(stageForDeletion: Bool) {
-        operationTask?.cancel()
-        operationTask = Task { await prepareCopy(stageForDeletion: stageForDeletion) }
+    private func requestPreparation(stageForDeletion: Bool) {
+        guard !isBusy else { return }
+        if needsFavoriteConversionConfirmation {
+            favoriteConfirmationStagesOriginal = stageForDeletion
+            showingFavoriteConversionConfirmation = true
+        } else {
+            launchPreparation(stageForDeletion: stageForDeletion)
+        }
     }
 
-    private func launchDeleteOriginal() {
+    private func launchPreparation(
+        stageForDeletion: Bool,
+        favoriteCopyRequested: Bool? = nil,
+        sourcePendingFavorite: Bool? = nil
+    ) {
         operationTask?.cancel()
-        operationTask = Task { await deleteOriginal() }
+        operationTask = Task {
+            await prepareCopy(
+                stageForDeletion: stageForDeletion,
+                favoriteCopyRequested: favoriteCopyRequested,
+                sourcePendingFavorite: sourcePendingFavorite
+            )
+        }
     }
 
-    private func launchStageOriginal() {
+    private func launchStageOrFinishOriginal() {
         operationTask?.cancel()
-        operationTask = Task { stageOriginal() }
+        operationTask = Task { await stageOrFinishOriginal() }
     }
 
 }

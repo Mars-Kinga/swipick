@@ -2,6 +2,17 @@ import Photos
 import SwiftUI
 import UIKit
 
+private struct ReviewInNarrowPaneKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var reviewInNarrowPane: Bool {
+        get { self[ReviewInNarrowPaneKey.self] }
+        set { self[ReviewInNarrowPaneKey.self] = newValue }
+    }
+}
+
 struct ReviewQueueView: View {
     private let sourceScope: LibraryScope?
     private let explicitAssetIDs: [String]?
@@ -21,6 +32,9 @@ struct ReviewQueueView: View {
     @Environment(\.openHomeTab) private var openHomeTab
     @Environment(\.openReviewScope) private var openReviewScope
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.reviewInNarrowPane) private var reviewInNarrowPane
     @Environment(AppSettings.self) private var settings
     @Environment(ReviewResumeStore.self) private var resume
     @Environment(PhotoSuggestionService.self) private var suggestions
@@ -65,7 +79,9 @@ struct ReviewQueueView: View {
     @State private var isUpdatingLibrary = false
     @State private var conversionSelection: LiveConversionSelection?
     @State private var shareFile: ReviewShareFile?
-    @State private var shareFileForCleanup: URL?
+    @State private var shareFileForCleanup: PhotoSharePayload?
+    @State private var sharePreparationTask: Task<Void, Never>?
+    @State private var sharePreparationID: UUID?
     @State private var isPreparingShare = false
     @State private var showingError = false
     @State private var operationError: String?
@@ -78,6 +94,8 @@ struct ReviewQueueView: View {
     @State private var previewScale: CGFloat = 1
     @State private var previewOffset: CGSize = .zero
     @State private var videoSoundEnabled = false
+    @State private var videoControlsVisible = false
+    @State private var showsCloudPreviewRetry = false
     @State private var pinchStartScale: CGFloat = 1
     @State private var panStartOffset: CGSize = .zero
     @State private var panTranslation: CGSize = .zero
@@ -246,9 +264,30 @@ struct ReviewQueueView: View {
         isTransitioning || isPreparingShare || isUpdatingLibrary
     }
 
+    private var usesExpandedReviewLayout: Bool {
+        !reviewInNarrowPane && (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
+    }
+
+    private var usesExpandedCompletionLayout: Bool {
+        (reviewInNarrowPane || horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
+    }
+
+    private var usesScrollableReviewLayout: Bool {
+        dynamicTypeSize.isAccessibilitySize ||
+            (verticalSizeClass == .compact && !usesExpandedReviewLayout && !reviewInNarrowPane)
+    }
+
+    private var showsProgressInToolbar: Bool {
+        (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
+    }
+
     private var queueTitle: String {
         if let suggestedTitle { return suggestedTitle }
         guard let sourceScope else { return String(localized: "编辑决定") }
+        if sourceScope == .random { return "" }
         if case .month = sourceScope, let date = currentAsset?.creationDate {
             return date.zeyingShortDate
         }
@@ -263,12 +302,14 @@ struct ReviewQueueView: View {
 
     private var queueNavigationTitle: some View {
         HStack(spacing: 4) {
-            Text(queueTitle)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            if !queueTitle.isEmpty {
+                Text(queueTitle)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
             if let date = queueHeaderDate {
-                Text("· \(date.zeyingShortDate)")
+                Text(queueTitle.isEmpty ? date.zeyingShortDate : "· \(date.zeyingShortDate)")
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
@@ -285,6 +326,10 @@ struct ReviewQueueView: View {
         return currentAsset?.creationDate
     }
 
+    private var showsRestoreOrderAction: Bool {
+        sourceScope != .random && queueSortMode == .shuffled
+    }
+
     var body: some View {
         Group {
             if !hasLoaded {
@@ -297,10 +342,14 @@ struct ReviewQueueView: View {
                 missingAssetContent
             }
         }
+        .background(Color(uiColor: reviewInNarrowPane ? .systemBackground : .systemGroupedBackground)
+            .ignoresSafeArea())
         .navigationTitle(queueTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color(uiColor: .systemGroupedBackground), for: .navigationBar)
+        .toolbarBackground(reviewInNarrowPane ? .hidden : .visible, for: .navigationBar)
         .safeAreaInset(edge: .top, spacing: 0) {
-            if let suggestedReason, hasLoaded, !isComplete {
+            if let suggestedReason, hasLoaded, !isComplete, !reviewInNarrowPane {
                 Text(suggestedReason)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -312,63 +361,71 @@ struct ReviewQueueView: View {
         .onChange(of: isComplete) { _, complete in
             if complete { onSuggestedCompletion?() }
         }
-        .toolbar(.visible, for: .navigationBar)
+        .onChange(of: currentAsset?.localIdentifier) { _, _ in
+            videoControlsVisible = false
+        }
+        .toolbar(reviewInNarrowPane ? .hidden : .visible, for: .navigationBar)
         // Review swipes also start in the letterboxed space and at the edges;
         // the visible Back button remains available for navigation.
         .background(ReviewNavigationSwipeGuard().frame(width: 0, height: 0))
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 if sourceScope != nil, remainingCount > 1 {
-                    Button {
+                    Button(showsRestoreOrderAction
+                           ? String(localized: "恢复本组原有顺序")
+                           : String(localized: "随机审查本组照片与视频"),
+                           systemImage: showsRestoreOrderAction ? "arrow.up.arrow.down" : "shuffle") {
                         toggleRemainingOrder()
-                    } label: {
-                        Image(systemName: queueSortMode == .shuffled ? "arrow.up.arrow.down" : "shuffle")
                     }
                     .allowsHitTesting(!actionsDisabled && !isLivePhotoPressed)
-                    .accessibilityLabel(queueSortMode == .shuffled
-                        ? String(localized: "恢复本组原有顺序")
-                        : String(localized: "随机审查本组照片与视频"))
                     .accessibilityHint(String(localized: "当前照片也会切换，仍可撤销上一步"))
                 }
             }
             ToolbarItem(placement: .principal) {
-                queueNavigationTitle
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                if !isComplete, let currentAsset {
-                    HStack(spacing: 8) {
-                        Button {
-                            guard !actionsDisabled else { return }
-                            showingInfo = true
-                        } label: {
-                            Image(systemName: "info.circle")
+                VStack(spacing: 2) {
+                    HStack(spacing: 12) {
+                        if showsProgressInToolbar && !isComplete {
+                            Text("\(min(index + 1, max(queueIDs.count, 1))) / \(queueIDs.count)")
+                                .font(.subheadline.weight(.semibold).monospacedDigit())
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        .accessibilityLabel(String(localized: "照片信息"))
-
-                        if currentAsset.mediaSubtypes.contains(.photoLive) {
-                            Button {
-                                guard !actionsDisabled else { return }
-                                conversionSelection = LiveConversionSelection(id: currentAsset.localIdentifier)
-                            } label: {
-                                Image(systemName: "livephoto.slash")
-                            }
-                            .accessibilityLabel(String(localized: "转为静态照片"))
-                        }
-
-                        Button {
-                            guard !actionsDisabled else { return }
-                            Task { await prepareShare(for: currentAsset) }
-                        } label: {
-                            if isPreparingShare {
-                                ProgressView()
-                            } else {
-                                Image(systemName: "square.and.arrow.up")
-                            }
-                        }
-                        .disabled(isPreparingShare)
-                        .accessibilityLabel(String(localized: "分享照片或视频"))
+                        queueNavigationTitle
                     }
-                    .allowsHitTesting(!actionsDisabled)
+                    if usesExpandedReviewLayout, !isComplete, let currentAsset {
+                        if reviews.decision(for: currentAsset.localIdentifier) != nil ||
+                            reviews.isPendingFavorite(currentAsset.localIdentifier) {
+                            reviewDecisionStatus(for: currentAsset)
+                        }
+                    }
+                }
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if !isComplete, let currentAsset {
+                    Button(currentAsset.mediaType.zeyingDetailsTitle, systemImage: "info.circle") {
+                        guard !actionsDisabled else { return }
+                        showingInfo = true
+                    }
+                    .disabled(actionsDisabled)
+
+                    if currentAsset.mediaSubtypes.contains(.photoLive) {
+                        Button(String(localized: "转为静态照片"), systemImage: "livephoto.slash") {
+                            guard !actionsDisabled else { return }
+                            conversionSelection = LiveConversionSelection(id: currentAsset.localIdentifier)
+                        }
+                        .disabled(actionsDisabled)
+                    }
+
+                    if isPreparingShare {
+                        ProgressView()
+                            .accessibilityLabel(String(localized: "正在准备分享…"))
+                    } else {
+                        Button(String(localized: "分享照片或视频"), systemImage: "square.and.arrow.up") {
+                            guard !actionsDisabled else { return }
+                            startPreparingShare(for: currentAsset)
+                        }
+                        .disabled(actionsDisabled)
+                    }
                 }
             }
         }
@@ -379,7 +436,7 @@ struct ReviewQueueView: View {
                         AssetInfoView(asset: currentAsset, sizes: sizes)
                             .padding(20)
                     }
-                    .navigationTitle(String(localized: "照片信息"))
+                    .navigationTitle(currentAsset.mediaType.zeyingDetailsTitle)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
@@ -428,13 +485,16 @@ struct ReviewQueueView: View {
             }
         }
         .sheet(item: $shareFile, onDismiss: cleanupShareFile) { file in
-            ActivityShareSheet(fileURL: file.url)
+            ActivityShareSheet(payload: file.payload)
         }
         .overlay {
             if isPreparingShare {
                 ZStack {
                     Color.black.opacity(0.12).ignoresSafeArea()
-                    ProgressView(String(localized: "正在准备分享…"))
+                    VStack(spacing: 12) {
+                        ProgressView(String(localized: "正在准备分享…"))
+                        Button(String(localized: "取消")) { cancelPreparingShare() }
+                    }
                         .padding(.horizontal, 22)
                         .padding(.vertical, 16)
                         .zeyingGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -537,6 +597,7 @@ struct ReviewQueueView: View {
             reviews.beginInteractiveReview()
         }
         .onDisappear {
+            cancelPreparingShare()
             library.stopReviewPrefetching()
             guard reviewSessionActive else { return }
             reviewSessionActive = false
@@ -546,7 +607,7 @@ struct ReviewQueueView: View {
 
     @ViewBuilder
     private func reviewContent(for asset: PHAsset) -> some View {
-        if dynamicTypeSize.isAccessibilitySize {
+        if usesScrollableReviewLayout {
             ScrollView { reviewStack(for: asset) }
         } else {
             reviewStack(for: asset)
@@ -554,14 +615,27 @@ struct ReviewQueueView: View {
     }
 
     private func reviewStack(for asset: PHAsset) -> some View {
-        VStack(spacing: 10) {
-            progressHeader
-            if !hasSeenReviewHint {
+        let contentLayout = usesExpandedReviewLayout || reviewInNarrowPane
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: 12))
+            : AnyLayout(VStackLayout(spacing: 10))
+        return VStack(spacing: usesExpandedReviewLayout ? 4 : 10) {
+            if reviewInNarrowPane {
+                Text("\(min(index + 1, max(queueIDs.count, 1))) / \(queueIDs.count)")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(String(localized: "审核进度"))
+            } else {
+                progressHeader
+            }
+            if !reviewInNarrowPane && !hasSeenReviewHint {
                 HStack(alignment: .center, spacing: 10) {
                     Image(systemName: "info.circle")
                         .foregroundStyle(.secondary)
-                    Text(String(localized: "用下方按钮或滑动做决定；待删除先存入清单，确认后才删除。"))
-                        .font(.caption)
+                    Text(dynamicTypeSize.isAccessibilitySize
+                         ? String(localized: "用下方按钮选择待删、保留或待决定")
+                         : String(localized: "左滑待删、右滑保留、下滑待决定"))
+                        .font(.body)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     Button { hasSeenReviewHint = true } label: {
@@ -577,123 +651,153 @@ struct ReviewQueueView: View {
                 .padding(.trailing, 2)
                 .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
             }
-            if let decision = reviews.decision(for: asset.localIdentifier) {
-                Text(String(localized: "上次决定：\(decision.title)"))
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityAddTraits(.updatesFrequently)
-            }
-            if reviews.isPendingFavorite(asset.localIdentifier) {
-                Label(String(localized: "待确认收藏"), systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 8) {
-                albumCarousel(for: asset)
-                    .frame(maxWidth: .infinity)
-                AssetSizeCapsule(asset: asset, sizes: sizes)
-                    .fixedSize()
+            if !usesExpandedReviewLayout && !reviewInNarrowPane {
+                if let decision = reviews.decision(for: asset.localIdentifier) {
+                    Text(String(localized: "上次决定：\(decision.title)"))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+                if reviews.isPendingFavorite(asset.localIdentifier) {
+                    Label(String(localized: "待确认收藏"), systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            GeometryReader { proxy in
-                let foregroundSize = fittedCardSize(for: asset, in: proxy.size)
-                let nextAsset = upcomingAsset
-                let nextSize = nextAsset.map { fittedCardSize(for: $0, in: proxy.size) }
-                let nextImage = nextAsset.flatMap(cachedUpcomingPreview)
-                let revealDistance = horizontalExitDistance(
-                    cardWidth: foregroundSize.width,
-                    cardHeight: foregroundSize.height,
-                    availableWidth: proxy.size.width
-                )
-                let verticalRevealDistance = max((proxy.size.height + foregroundSize.height) / 2 + 120, 360)
-                let nextOpacity = reduceMotion ? 0 : min(max(
-                    abs(dragOffset) / revealDistance,
-                    downwardOffset / verticalRevealDistance
-                ), 1)
-                let availableFrame = proxy.frame(in: .global)
-                let foregroundFrame = CGRect(
-                    x: availableFrame.midX - foregroundSize.width / 2,
-                    y: availableFrame.midY - foregroundSize.height / 2,
-                    width: foregroundSize.width,
-                    height: foregroundSize.height
-                )
-                ZStack {
-                    // Keep the screen sides tappable even when a landscape photo
-                    // occupies only the center of the available card area.
-                    DecisionTapZones(
-                        isVideo: false,
-                        decisionEnabled: settings.sideTapDecisionsEnabled && !actionsDisabled && !isLivePhotoPressed &&
-                            (asset.mediaType == .video || (!isZooming && previewScale <= 1.01)),
-                        capturesEmptyArea: true
-                    ) {
-                        perform(.delete)
-                    } onKeep: {
-                        perform(.keep)
+            if !reviewInNarrowPane {
+                HStack(spacing: 8) {
+                    albumCarousel(for: asset)
+                        .frame(maxWidth: .infinity)
+                    AssetSizeCapsule(asset: asset, sizes: sizes)
+                        .fixedSize()
+                }
+            }
+
+            contentLayout {
+                if usesExpandedReviewLayout {
+                    expandedLeadingActions
+                }
+
+                GeometryReader { proxy in
+                    let foregroundSize = fittedCardSize(for: asset, in: proxy.size)
+                    let nextAsset = upcomingAsset
+                    let nextSize = nextAsset.map { fittedCardSize(for: $0, in: proxy.size) }
+                    let nextImage = nextAsset.flatMap(cachedUpcomingPreview)
+                    let revealDistance = horizontalExitDistance(
+                        cardWidth: foregroundSize.width,
+                        cardHeight: foregroundSize.height,
+                        availableWidth: proxy.size.width
+                    )
+                    let verticalRevealDistance = max((proxy.size.height + foregroundSize.height) / 2 + 120, 360)
+                    let nextOpacity = reduceMotion ? 0 : min(max(
+                        abs(dragOffset) / revealDistance,
+                        downwardOffset / verticalRevealDistance
+                    ), 1)
+                    let availableFrame = proxy.frame(in: .global)
+                    let foregroundFrame = CGRect(
+                        x: availableFrame.midX - foregroundSize.width / 2,
+                        y: availableFrame.midY - foregroundSize.height / 2,
+                        width: foregroundSize.width,
+                        height: foregroundSize.height
+                    )
+                    ZStack {
+                        if reviewInNarrowPane {
+                            accessibleAssetPreview(for: asset)
+                                .frame(width: foregroundSize.width, height: foregroundSize.height)
+                                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        } else {
+                            // Keep the screen sides tappable even when a landscape photo
+                            // occupies only the center of the available card area.
+                            DecisionTapZones(
+                                isVideo: false,
+                                decisionEnabled: settings.sideTapDecisionsEnabled && !actionsDisabled && !isLivePhotoPressed &&
+                                    !(asset.mediaType == .video && videoControlsVisible) &&
+                                    (asset.mediaType == .video || (!isZooming && previewScale <= 1.01)),
+                                capturesEmptyArea: true
+                            ) {
+                                perform(.delete)
+                            } onKeep: {
+                                perform(.keep)
+                            }
+                                .frame(width: proxy.size.width, height: proxy.size.height)
+                                // This invisible surface handles swipes in the empty
+                                // space around landscape media without competing with
+                                // video playback controls.
+                                .highPriorityGesture(
+                                    swipeGesture,
+                                    including: dynamicTypeSize.isAccessibilitySize ? .none : .all
+                                )
+
+                            if let nextImage, let nextSize {
+                                Image(uiImage: nextImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: nextSize.width, height: nextSize.height)
+                                    .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                                    // The next image stays invisible at rest. Its reveal
+                                    // tracks the same distance used to dismiss this card.
+                                    .opacity(nextOpacity)
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                            }
+
+                            reviewCard(for: asset)
+                                .frame(width: foregroundSize.width, height: foregroundSize.height)
+                        }
                     }
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        // This invisible surface handles swipes in the empty
-                        // space around landscape media without competing with
-                        // video playback controls.
-                        .highPriorityGesture(
-                            swipeGesture,
-                            including: dynamicTypeSize.isAccessibilitySize ? .none : .all
-                        )
-
-                    if let nextImage, let nextSize {
-                        Image(uiImage: nextImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: nextSize.width, height: nextSize.height)
-                            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                            // The next image stays invisible at rest. Its reveal
-                            // tracks the same distance used to dismiss this card.
-                            .opacity(nextOpacity)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+                    .onAppear {
+                        cardWidth = foregroundSize.width
+                        cardHeight = foregroundSize.height
+                        cardAreaWidth = proxy.size.width
+                        cardAreaHeight = proxy.size.height
+                        videoCardFrame = foregroundFrame
                     }
+                    .onChange(of: foregroundSize) { _, size in
+                        cardWidth = size.width
+                        cardHeight = size.height
+                    }
+                    .onChange(of: foregroundFrame) { _, frame in
+                        videoCardFrame = frame
+                    }
+                    .onChange(of: proxy.size.height) { _, height in
+                        cardAreaHeight = height
+                    }
+                    .onChange(of: proxy.size.width) { _, width in
+                        cardAreaWidth = width
+                    }
+                }
+                .frame(height: usesScrollableReviewLayout
+                    ? (usesExpandedReviewLayout ? 278 : 260) : nil)
+                .frame(maxHeight: .infinity)
+                .layoutPriority(1)
 
-                    reviewCard(for: asset)
-                        .frame(width: foregroundSize.width, height: foregroundSize.height)
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .onAppear {
-                    cardWidth = foregroundSize.width
-                    cardHeight = foregroundSize.height
-                    cardAreaWidth = proxy.size.width
-                    cardAreaHeight = proxy.size.height
-                    videoCardFrame = foregroundFrame
-                }
-                .onChange(of: foregroundSize) { _, size in
-                    cardWidth = size.width
-                    cardHeight = size.height
-                }
-                .onChange(of: foregroundFrame) { _, frame in
-                    videoCardFrame = frame
-                }
-                .onChange(of: proxy.size.height) { _, height in
-                    cardAreaHeight = height
-                }
-                .onChange(of: proxy.size.width) { _, width in
-                    cardAreaWidth = width
+                if reviewInNarrowPane {
+                    narrowPreviewActions
+                } else if usesExpandedReviewLayout {
+                    expandedTrailingActions(for: asset)
+                } else {
+                    actionBar(for: asset)
                 }
             }
-            .frame(height: dynamicTypeSize.isAccessibilitySize ? 260 : nil)
-            .frame(maxHeight: .infinity)
-            .layoutPriority(1)
-
-            actionBar(for: asset)
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 24)
-        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+        .padding(.top, reviewInNarrowPane ? (verticalSizeClass == .compact ? 76 : 60) : 0)
+        .padding(.bottom, reviewInNarrowPane ? 12 : (usesExpandedReviewLayout ? 8 : 24))
+        .background(Color(uiColor: reviewInNarrowPane ? .systemBackground : .systemGroupedBackground)
+            .ignoresSafeArea())
         .task(id: "\(asset.localIdentifier)-\(upcomingAsset?.localIdentifier ?? "end")-\(library.prefetchRevision)") {
             let currentIndex = index
             let nextIdentifier = queueIDs.indices.contains(currentIndex + 1) ? queueIDs[currentIndex + 1] : nil
             upcomingPreviewIdentifier = nextIdentifier
             let next = upcomingAsset
             let readyPreview = next.flatMap { library.cachedReviewPreview(for: $0) }
-            upcomingPreview = readyPreview ?? next.flatMap { library.cachedQuickPreview(for: $0) }
+            upcomingPreview = readyPreview ?? next.flatMap {
+                $0.mediaType == .video ? nil : library.cachedQuickPreview(for: $0)
+            }
             library.prefetchReviewPreviews(
                 prefetchCandidates(after: currentIndex),
                 keeping: asset.localIdentifier
@@ -715,6 +819,7 @@ struct ReviewQueueView: View {
             }
         }
         .task(id: "\(asset.localIdentifier)-\(library.albumMembershipRevision)") {
+            guard !reviewInNarrowPane else { return }
             let libraryRevision = library.albumMembershipRevision
             let currentMembershipsReady = albumService.memberships(for: asset.localIdentifier) != nil
             if let nextIdentifier = upcomingAsset?.localIdentifier {
@@ -886,7 +991,8 @@ struct ReviewQueueView: View {
         DecisionTapZones(
             isVideo: asset.mediaType == .video,
             decisionEnabled: settings.sideTapDecisionsEnabled && !actionsDisabled && !isLivePhotoPressed &&
-                (asset.mediaType == .video || (!isZooming && previewScale <= 1.01))
+                !(asset.mediaType == .video && videoControlsVisible) &&
+                (asset.mediaType == .video || (!showsCloudPreviewRetry && !isZooming && previewScale <= 1.01))
         ) {
             perform(.delete)
         } onKeep: {
@@ -895,18 +1001,36 @@ struct ReviewQueueView: View {
     }
 
     @ViewBuilder
+    private func accessibleAssetPreview(for asset: PHAsset) -> some View {
+        let preview = AssetPreviewView(
+            asset: asset, library: library, videoSoundEnabled: $videoSoundEnabled,
+            initialPreview: handoffPreviewIdentifier == asset.localIdentifier ? handoffPreview : nil,
+            requiresFullQuality: true, autoplayVideo: true, isActive: !isTransitioning,
+            isLivePhotoPressed: isLivePhotoPressed,
+            onPreviewRetryVisibilityChange: { showsCloudPreviewRetry = $0 },
+            onVideoSurfaceTap: {
+                guard currentAsset?.localIdentifier == asset.localIdentifier else { return }
+                videoControlsVisible.toggle()
+            }
+        )
+        if asset.mediaType == .image {
+            preview
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(String(localized: "照片预览"))
+                .accessibilityValue(String(localized: "缩放 \(Int(previewScale * 100))%"))
+                .accessibilityAction(named: String(localized: "放大")) { setAccessiblePreviewScale(min(previewScale + 1, 4)) }
+                .accessibilityAction(named: String(localized: "缩小")) { setAccessiblePreviewScale(max(previewScale - 1, 1)) }
+                .accessibilityAction(named: String(localized: "恢复原始大小")) { resetPreviewZoom() }
+        } else {
+            preview
+                .id(asset.localIdentifier)
+        }
+    }
+
+    @ViewBuilder
     private func reviewCard(for asset: PHAsset) -> some View {
         let content = ZStack {
-            AssetPreviewView(
-                asset: asset,
-                library: library,
-                videoSoundEnabled: $videoSoundEnabled,
-                initialPreview: handoffPreviewIdentifier == asset.localIdentifier ? handoffPreview : nil,
-                requiresFullQuality: true,
-                autoplayVideo: true,
-                isActive: !isTransitioning,
-                isLivePhotoPressed: isLivePhotoPressed
-            )
+            accessibleAssetPreview(for: asset)
                 .scaleEffect(asset.mediaType == .image ? previewScale : 1)
                 .offset(asset.mediaType == .image ? previewOffset : .zero)
 
@@ -968,21 +1092,55 @@ struct ReviewQueueView: View {
 
     private var progressHeader: some View {
         VStack(spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(min(index + 1, max(queueIDs.count, 1))) / \(queueIDs.count)")
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                Spacer()
-                Text(String(localized: "剩余 \(remainingCount)"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if !showsProgressInToolbar {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(min(index + 1, max(queueIDs.count, 1))) / \(queueIDs.count)")
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                    Spacer()
+                    Text(String(localized: "剩余 \(remainingCount)"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            ProgressView(value: Double(min(index, queueIDs.count)), total: Double(max(queueIDs.count, 1)))
-                .tint(.primary)
-                .accessibilityLabel(String(localized: "审核进度"))
-                .accessibilityValue(String(localized: "已浏览 \(min(index, queueIDs.count)) 项，共 \(queueIDs.count) 项"))
+            HStack(spacing: 12) {
+                ProgressView(value: Double(min(index, queueIDs.count)), total: Double(max(queueIDs.count, 1)))
+                    .tint(.primary)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel(String(localized: "审核进度"))
+                    .accessibilityValue(String(localized: "已浏览 \(min(index, queueIDs.count)) 项，共 \(queueIDs.count) 项"))
+                if showsProgressInToolbar {
+                    Text(String(localized: "剩余 \(remainingCount)"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
         }
-        .padding(.top, 2)
+        .padding(.top, usesExpandedReviewLayout ? 0 : 2)
+    }
+
+    @ViewBuilder
+    private func reviewDecisionStatus(for asset: PHAsset) -> some View {
+        let decision = reviews.decision(for: asset.localIdentifier)
+        let pendingFavorite = reviews.isPendingFavorite(asset.localIdentifier)
+        if decision != nil || pendingFavorite {
+            HStack(spacing: 12) {
+                if let decision {
+                    Text(String(localized: "上次决定：\(decision.title)"))
+                        .font(.caption.weight(.medium))
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+                if pendingFavorite {
+                    Text(String(localized: "待确认收藏"))
+                        .font(.caption)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+        }
     }
 
     @ViewBuilder
@@ -1019,7 +1177,11 @@ struct ReviewQueueView: View {
     ) -> some View {
         let opacity = min(max((distance - revealStart) / revealRange, 0), 1)
         let growth = min(max((distance - revealStart - 37) / 100, 0), 1)
-        return Label(title, systemImage: symbol)
+        return ViewThatFits(in: .horizontal) {
+            Label(title, systemImage: symbol)
+                .fixedSize(horizontal: true, vertical: false)
+            Image(systemName: symbol)
+        }
             .font(.system(size: 30, weight: .heavy))
             .foregroundStyle(tint)
             .padding(.horizontal, 17)
@@ -1064,6 +1226,99 @@ struct ReviewQueueView: View {
         } else {
             standardActionBar(for: asset)
         }
+    }
+
+    private var narrowPreviewActions: some View {
+        VStack(spacing: 12) {
+            narrowPreviewButton(String(localized: "保留"), symbol: "heart.fill") {
+                perform(.keep)
+            }
+            narrowPreviewButton(String(localized: "删除"), symbol: "trash") {
+                perform(.delete)
+            }
+            .accessibilityHint(String(localized: "将照片加入待删除清单"))
+            narrowPreviewButton(String(localized: "待决定"), symbol: "questionmark") {
+                perform(.later)
+            }
+        }
+        .frame(width: 112)
+        .disabled(actionsDisabled)
+    }
+
+    private func narrowPreviewButton(
+        _ title: String, symbol: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 112, height: 44)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .zeyingGlass(in: Capsule())
+    }
+
+    private var expandedLeadingActions: some View {
+        VStack(spacing: 8) {
+            expandedCircleAction(symbol: "xmark", title: String(localized: "待删除"), tint: .red,
+                                 diameter: 56, hint: String(localized: "将照片加入待删除清单")) {
+                perform(.delete)
+            }
+            expandedCircleAction(symbol: hasUndoableAction ? "arrow.uturn.backward" : "chevron.left",
+                                 title: String(localized: "上一张"), tint: .primary, diameter: 44,
+                                 hint: hasUndoableAction ? String(localized: "撤销上一步") : String(localized: "返回上一张已处理照片")) {
+                undoLastAction()
+            }
+            .disabled(!canUndoHere)
+        }
+        .frame(width: 76)
+        .frame(height: 240, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .center)
+        .disabled(actionsDisabled)
+    }
+
+    private func expandedTrailingActions(for asset: PHAsset) -> some View {
+        VStack(spacing: 8) {
+            expandedCircleAction(symbol: "heart.fill", title: String(localized: "保留"), tint: .cyan,
+                                 diameter: 56, hint: String(localized: "将照片标记为保留")) {
+                perform(.keep)
+            }
+            expandedCircleAction(
+                symbol: asset.isFavorite || reviews.isPendingFavorite(asset.localIdentifier) ? "star.fill" : "star",
+                title: favoriteActionTitle(for: asset), tint: .yellow, diameter: 44,
+                hint: String(localized: "暂存收藏，稍后在清单确认")) {
+                handleFavoriteAction(for: asset)
+            }
+            .disabled(!asset.isFavorite && reviews.isPendingFavorite(asset.localIdentifier))
+            expandedCircleAction(symbol: "questionmark", title: String(localized: "稍后"), tint: .secondary,
+                                 diameter: 44, hint: String(localized: "暂不决定")) {
+                perform(.later)
+            }
+        }
+        .frame(width: 76)
+        .frame(height: 240, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .center)
+        .disabled(actionsDisabled)
+    }
+
+    private func expandedCircleAction(
+        symbol: String, title: String, tint: Color, diameter: CGFloat, hint: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        VStack(spacing: 2) {
+            circularActionButton(symbol: symbol, tint: tint, diameter: diameter,
+                                 accessibilityLabel: title, accessibilityHint: hint, action: action)
+                .frame(height: 56)
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .accessibilityHidden(true)
+        }
+        .frame(width: 76)
     }
 
     private func handleFavoriteAction(for asset: PHAsset) {
@@ -1243,9 +1498,42 @@ struct ReviewQueueView: View {
     }
 
     private var completedContent: some View {
-        VStack(spacing: 18) {
-            Spacer()
+        Group {
+            if usesExpandedCompletionLayout {
+                ZeyingFoldAwareSplit {
+                    completedSummary
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.horizontal, reviewInNarrowPane ? 10 : 24)
+                } trailing: {
+                    GeometryReader { proxy in
+                        ScrollView {
+                            completedActions
+                                .frame(maxWidth: 340)
+                                .frame(maxWidth: .infinity)
+                                .frame(minHeight: proxy.size.height, alignment: .center)
+                        }
+                        .scrollIndicators(.hidden)
+                    }
+                    .padding(.horizontal, reviewInNarrowPane ? 10 : 24)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.vertical, 12)
+            } else {
+                VStack(spacing: 18) {
+                    Spacer()
+                    completedSummary
+                    completedActions
+                        .frame(maxWidth: 300)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(28)
+            }
+        }
+    }
 
+    private var completedSummary: some View {
+        VStack(spacing: 18) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 60, weight: .light))
                 .foregroundStyle(.green)
@@ -1269,11 +1557,15 @@ struct ReviewQueueView: View {
                     Text(String(localized: "本组还有 \(undecidedCountInGroup) 项待决定。"))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+                    .multilineTextAlignment(.center)
                 }
             }
+        }
+        .multilineTextAlignment(.center)
+    }
 
-            VStack(spacing: 12) {
+    private var completedActions: some View {
+        VStack(spacing: 12) {
                 if let nextGroupScope, let openReviewScope {
                     Button {
                         openReviewScope(nextGroupScope)
@@ -1317,13 +1609,7 @@ struct ReviewQueueView: View {
                     }
                     .buttonStyle(ZeyingGlassButtonStyle())
                 }
-            }
-            .frame(maxWidth: 300)
-
-            Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(28)
     }
 
     private func completedActionLabel(_ title: String, symbol: String) -> some View {
@@ -1337,7 +1623,6 @@ struct ReviewQueueView: View {
     private func loadQueueIfNeeded() async {
         guard !hasLoaded else { return }
         await library.ensureLoaded()
-        albumService.refreshIfNeeded(libraryRevision: library.revision)
 
         let identifiers: [String]
         var naturalOrder: [String] = []
@@ -1380,6 +1665,8 @@ struct ReviewQueueView: View {
             identifiers = []
         }
 
+        if sourceScope == .random { queueSortMode = .random }
+
         var seenIdentifiers: Set<String> = []
         queueIDs = identifiers.filter {
             library.asset(with: $0) != nil && seenIdentifiers.insert($0).inserted
@@ -1397,20 +1684,21 @@ struct ReviewQueueView: View {
                 keeping: firstIdentifier
             )
             if let first = library.asset(with: firstIdentifier) {
+                // Prepare both visible cards before showing the queue. Album
+                // membership does not affect image clarity and loads later.
                 async let firstPreview = library.prepareReviewPreview(for: first)
-                async let memberships: Void = albumService.loadMemberships(
-                    for: firstIdentifier, libraryRevision: library.albumMembershipRevision)
-                if queueIDs.indices.contains(index + 1), let second = library.asset(with: queueIDs[index + 1]) {
+                if queueIDs.indices.contains(index + 1),
+                   let second = library.asset(with: queueIDs[index + 1]) {
                     _ = await library.prepareUpcomingPreview(for: second)
                 }
                 _ = await firstPreview
-                await memberships
             }
         }
         guard !Task.isCancelled else { return }
         hasLoaded = true
+        Task { await albumService.refreshIfNeeded(libraryRevision: library.revision) }
         if let sourceScope, sourceScope != .later {
-            resume.rememberQueue(scope: sourceScope, assetIDs: queueIDs, position: index, sortMode: queueSortMode)
+            resume.rememberQueue(scope: sourceScope, assetIDs: queueIDs, sortMode: queueSortMode)
             presentResumeErrorIfNeeded()
         }
         rememberCurrentScopeIfNeeded()
@@ -1418,11 +1706,6 @@ struct ReviewQueueView: View {
 
     private func rememberCurrentScopeIfNeeded() {
         guard let sourceScope, sourceScope != .later else { return }
-        resume.updateQueuePosition(
-            scope: sourceScope,
-            position: index,
-            currentAssetID: queueIDs.indices.contains(index) ? queueIDs[index] : nil
-        )
         guard
               queueIDs.indices.contains(index),
               let asset = library.asset(with: queueIDs[index]) else {
@@ -1438,7 +1721,10 @@ struct ReviewQueueView: View {
         let remaining = Array(queueIDs[index...])
         let reordered: [String]
         let nextSortMode: ReviewQueueSortMode
-        if queueSortMode == .shuffled {
+        if sourceScope == .random {
+            reordered = ReviewQueueOrdering.shuffled(remaining)
+            nextSortMode = .random
+        } else if queueSortMode == .shuffled {
             reordered = ReviewQueueOrdering.restored(remaining, originalOrder: originalQueueOrder)
             nextSortMode = originalQueueSortMode
         } else {
@@ -1462,7 +1748,7 @@ struct ReviewQueueView: View {
             queueSortMode = nextSortMode
         }
         if let sourceScope {
-            resume.rememberQueue(scope: sourceScope, assetIDs: queueIDs, position: index, sortMode: queueSortMode)
+            resume.rememberQueue(scope: sourceScope, assetIDs: queueIDs, sortMode: queueSortMode)
             presentResumeErrorIfNeeded()
         }
         library.prefetchReviewPreviews(
@@ -1520,29 +1806,44 @@ struct ReviewQueueView: View {
         return !(localY < 72 && (localX < 72 || localX > videoCardFrame.width - 72))
     }
 
-    private func prepareShare(for asset: PHAsset) async {
+    private func startPreparingShare(for asset: PHAsset) {
         guard !isPreparingShare else { return }
+        let identifier = UUID()
+        sharePreparationID = identifier
         isPreparingShare = true
-        defer { isPreparingShare = false }
-
-        do {
-            let fileURL = try await library.exportForSharing(asset)
-            if Task.isCancelled {
-                try? FileManager.default.removeItem(at: fileURL)
-                return
+        sharePreparationTask = Task { @MainActor in
+            defer {
+                if sharePreparationID == identifier {
+                    sharePreparationID = nil
+                    sharePreparationTask = nil
+                    isPreparingShare = false
+                }
             }
-            shareFileForCleanup = fileURL
-            shareFile = ReviewShareFile(url: fileURL)
-        } catch {
-            operationError = String(localized: "无法准备分享文件：\(error.localizedDescription)")
-            showingError = true
+            do {
+                let payload = try await library.exportForSharing(asset)
+                guard !Task.isCancelled, sharePreparationID == identifier else {
+                    payload.cleanup()
+                    return
+                }
+                shareFileForCleanup = payload
+                shareFile = ReviewShareFile(payload: payload)
+            } catch {
+                guard !Task.isCancelled, sharePreparationID == identifier else { return }
+                operationError = String(localized: "无法准备分享文件：\(error.localizedDescription)")
+                showingError = true
+            }
         }
     }
 
+    private func cancelPreparingShare() {
+        sharePreparationID = nil
+        sharePreparationTask?.cancel()
+        sharePreparationTask = nil
+        isPreparingShare = false
+    }
+
     private func cleanupShareFile() {
-        if let shareFileForCleanup {
-            try? FileManager.default.removeItem(at: shareFileForCleanup)
-        }
+        shareFileForCleanup?.cleanup()
         shareFileForCleanup = nil
     }
 
@@ -1967,7 +2268,7 @@ struct ReviewQueueView: View {
         isTransitioning = true
         let transitionID = UUID()
         activeTransitionID = transitionID
-        withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
+        withAnimation(.easeOut(duration: 0.16), completionCriteria: .removed) {
             if decision == .later {
                 let exitDistance = max((cardAreaHeight + cardHeight) / 2 + 120, 360)
                 downwardOffset = max(downwardOffset + 160, exitDistance)
@@ -2014,7 +2315,7 @@ struct ReviewQueueView: View {
         let visiblePreview = upcomingPreviewIdentifier == next.localIdentifier ? upcomingPreview : nil
         handoffPreview = visiblePreview
             ?? library.cachedReviewPreview(for: next)
-            ?? library.cachedQuickPreview(for: next)
+            ?? (next.mediaType == .video ? nil : library.cachedQuickPreview(for: next))
     }
 
     private func emitDecisionHaptic() {
@@ -2129,6 +2430,13 @@ struct ReviewQueueView: View {
         isZooming = false
         isPinching = false
         isPanningPreview = false
+    }
+
+    private func setAccessiblePreviewScale(_ scale: CGFloat) {
+        previewScale = scale
+        previewOffset = clampedPreviewOffset(previewOffset)
+        pinchStartScale = scale
+        isZooming = scale > 1.01
     }
 }
 
@@ -2259,7 +2567,7 @@ private struct AlbumRemovalTarget {
 
 private struct ReviewShareFile: Identifiable {
     let id = UUID()
-    let url: URL
+    let payload: PhotoSharePayload
 }
 
 struct PendingDecisionsView: View {
@@ -2309,10 +2617,10 @@ struct PendingDecisionsView: View {
                 } else if pendingIDs.isEmpty {
                     ZeyingEmptyState(
                         symbol: "questionmark.circle",
-                        title: unavailablePendingCount > 0 ? String(localized: "当前没有可访问的待决定内容") : String(localized: "没有待决定照片"),
+                        title: unavailablePendingCount > 0 ? String(localized: "当前没有可访问的待决定内容") : String(localized: "没有待决定照片或视频"),
                         message: unavailablePendingCount > 0
                             ? String(localized: "恢复照片访问后，如果照片仍在图库，原来的决定会重新出现。")
-                            : String(localized: "在审核时点按问号，照片会出现在这里。")
+                            : String(localized: "审核时下滑或选择待决定，照片与视频会出现在这里。")
                     )
                 } else {
                     continueReviewingButton
@@ -2427,7 +2735,7 @@ private struct PendingAssetRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(String(localized: "待决定照片，\(asset.creationDate?.zeyingShortDate ?? String(localized: "日期未知"))"))
+        .accessibilityLabel(String(localized: "待决定\(asset.mediaType == .video ? String(localized: "视频") : String(localized: "照片"))，\(asset.creationDate?.zeyingDetailedDate ?? String(localized: "日期未知"))"))
     }
 }
 

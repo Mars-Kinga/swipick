@@ -11,16 +11,33 @@ struct RootView: View {
     let suggestions: PhotoSuggestionService
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     @State private var selectedTab: RootTab = .home
     @State private var suggestionsOpenedFromHome = false
     @State private var homePath = NavigationPath()
+    @State private var suggestionsPath = NavigationPath()
     @State private var settings = AppSettings()
     @State private var resume = ReviewResumeStore()
     // The first version could mark the guide as seen when its presentation was
     // interrupted by the authorization-to-loading transition. Offer the fixed
     // guide once more to installations that may have hit that path.
     @AppStorage("com.mars.zeying.hasSeenGuide.v2") private var hasSeenGuide = false
+
+    private func usesRightTabRail(in geometry: GeometryProxy) -> Bool {
+        guard verticalSizeClass == .compact,
+              UIDevice.current.userInterfaceIdiom == .phone else { return false }
+        if #available(iOS 27.1, *) {
+            return geometry.reservedRegions(kind: .division, options: .includeInactive).isEmpty
+        }
+        return true
+    }
+
+    private func selectTab(_ tab: RootTab) {
+        guard tab != selectedTab else { return }
+        suggestions.deferAnalysisForInteraction()
+        selectedTab = tab
+    }
 
     var body: some View {
         Group {
@@ -58,23 +75,23 @@ struct RootView: View {
         .environment(suggestions)
         .environment(\.openSummaryTab, {
             homePath = NavigationPath()
-            selectedTab = .summary
+            selectTab(.summary)
         })
         .environment(\.openPendingTab, {
             var path = NavigationPath()
             path.append(HomeDestination.pending)
             homePath = path
-            selectedTab = .home
+            selectTab(.home)
         })
         .environment(\.openHomeTab, {
             homePath = NavigationPath()
-            selectedTab = .home
+            selectTab(.home)
         })
         .environment(\.openReviewScope, { scope in
             var path = NavigationPath()
             path.append(HomeDestination.scope(scope))
             homePath = path
-            selectedTab = .home
+            selectTab(.home)
         })
         .onChange(of: scenePhase) { _, phase in
             suggestions.setForegroundActive(phase == .active)
@@ -110,7 +127,6 @@ struct RootView: View {
             }
         }
         .onChange(of: selectedTab) { previous, current in
-            suggestions.deferAnalysisForInteraction()
             if previous == .suggestions && current != .suggestions {
                 suggestionsOpenedFromHome = false
             }
@@ -144,11 +160,48 @@ struct RootView: View {
     }
 
     private var tabView: some View {
+        GeometryReader { geometry in
+            let foldedPortraitHeaderInset: CGFloat = {
+                guard #available(iOS 27.1, *),
+                      UIDevice.current.userInterfaceIdiom == .phone,
+                      geometry.size.height > geometry.size.width else { return 0 }
+                let hasTrailingCamera = geometry.reservedRegions(kind: .occlusion)
+                    .contains { region in
+                        region.isActive && region.frame.midX > geometry.size.width / 2 &&
+                            region.frame.minY < geometry.size.height / 4
+                    }
+                return hasTrailingCamera ? 24 : 0
+            }()
+            let expandedFold: Bool = {
+                guard #available(iOS 27.1, *),
+                      UIDevice.current.userInterfaceIdiom == .phone,
+                      geometry.size.width > geometry.size.height else { return false }
+                return geometry.reservedRegions(kind: .division, options: .includeInactive)
+                    .contains { $0.frame.minX > 0 && $0.frame.maxX < geometry.size.width }
+            }()
+            if verticalSizeClass == .compact && UIDevice.current.userInterfaceIdiom == .phone {
+                let showRightTabRail = usesRightTabRail(in: geometry)
+                HStack(spacing: 0) {
+                    nativeTabView(showRightTabRail: showRightTabRail)
+                        .environment(\.zeyingFoldedPortraitHeaderInset, foldedPortraitHeaderInset)
+                        .environment(\.zeyingExpandedFold, expandedFold)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if showRightTabRail { rightTabRail }
+                }
+                .ignoresSafeArea(.container, edges: showRightTabRail ? .trailing : [])
+            } else {
+                nativeTabView(showRightTabRail: false)
+                    .environment(\.zeyingFoldedPortraitHeaderInset, foldedPortraitHeaderInset)
+                    .environment(\.zeyingExpandedFold, expandedFold)
+            }
+        }
+    }
+
+    private func nativeTabView(showRightTabRail: Bool) -> some View {
         TabView(selection: Binding(
             get: { selectedTab },
             set: { tab in
-                if tab != selectedTab { suggestions.deferAnalysisForInteraction() }
-                selectedTab = tab
+                selectTab(tab)
             }
         )) {
             NavigationStack(path: $homePath) {
@@ -160,20 +213,21 @@ struct RootView: View {
                     albumAssignments: albumAssignments,
                     onOpenSummary: {
                         homePath = NavigationPath()
-                        selectedTab = .summary
+                        selectTab(.summary)
                     },
                     onOpenSuggestions: {
                         suggestionsOpenedFromHome = true
-                        selectedTab = .suggestions
+                        selectTab(.suggestions)
                     }
                 )
             }
+            .toolbar(showRightTabRail ? .hidden : .automatic, for: .tabBar)
             .tabItem {
                 Label(String(localized: "整理"), systemImage: "square.stack.3d.up")
             }
             .tag(RootTab.home)
 
-            NavigationStack {
+            NavigationStack(path: $suggestionsPath) {
                 SuggestionsView(
                     library: library,
                     reviews: reviews,
@@ -181,12 +235,14 @@ struct RootView: View {
                     albumService: albumService,
                     albumAssignments: albumAssignments,
                     showsBackToHome: suggestionsOpenedFromHome,
+                    isFullScreenReview: !suggestionsPath.isEmpty,
                     onBackToHome: {
                         homePath = NavigationPath()
-                        selectedTab = .home
+                        selectTab(.home)
                     }
                 )
             }
+            .toolbar(showRightTabRail ? .hidden : .automatic, for: .tabBar)
             .tabItem {
                 Label(String(localized: "清理建议"), systemImage: "wand.and.stars")
             }
@@ -201,19 +257,54 @@ struct RootView: View {
                     albumAssignments: albumAssignments
                 )
             }
+            .toolbar(showRightTabRail ? .hidden : .automatic, for: .tabBar)
             .tabItem {
                 Label(String(localized: "清单"), systemImage: "checklist")
             }
             .tag(RootTab.summary)
 
             NavigationStack {
-                SettingsView(library: library)
+                SettingsView(library: library, reviews: reviews)
             }
+            .toolbar(showRightTabRail ? .hidden : .automatic, for: .tabBar)
             .tabItem {
                 Label(String(localized: "设置"), systemImage: "gearshape")
             }
             .tag(RootTab.settings)
         }
+    }
+
+    private var rightTabRail: some View {
+        VStack(spacing: 6) {
+            rightTabButton(.home, symbol: "square.stack.3d.up", title: String(localized: "整理"))
+            rightTabButton(.suggestions, symbol: "wand.and.stars", title: String(localized: "清理建议"))
+            rightTabButton(.summary, symbol: "checklist", title: String(localized: "清单"))
+            rightTabButton(.settings, symbol: "gearshape", title: String(localized: "设置"))
+        }
+        .padding(6)
+        .zeyingGlass(in: Capsule())
+        .padding(.horizontal, 8)
+        .frame(maxHeight: .infinity)
+    }
+
+    private func rightTabButton(_ tab: RootTab, symbol: String, title: String) -> some View {
+        Button {
+            selectTab(tab)
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 20, weight: .semibold))
+                .frame(width: 50, height: 50)
+                .foregroundStyle(selectedTab == tab ? Color.primary : Color.secondary)
+                .background {
+                    if selectedTab == tab {
+                        Circle().fill(Color(uiColor: .tertiarySystemFill))
+                    }
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selectedTab == tab ? .isSelected : [])
     }
 
     private var shouldStartLibraryLoad: Bool {

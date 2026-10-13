@@ -132,15 +132,98 @@ struct ZeyingEmptyState: View {
 
 struct ZeyingRootPageTitle: View {
     let title: String
+    var matchesHomeExpandedPosition = false
+    var usesHomeHeaderHeight = false
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.zeyingFoldedPortraitHeaderInset) private var foldedPortraitHeaderInset
+
+    private var topPadding: CGFloat {
+        if foldedPortraitHeaderInset > 0 { return 4 + foldedPortraitHeaderInset }
+        return matchesHomeExpandedPosition &&
+            (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize ? 32 : 4
+    }
+
+    private var expanded: Bool {
+        foldedPortraitHeaderInset == 0 &&
+            (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
+    }
 
     var body: some View {
         Text(title)
             .font(.largeTitle.weight(.bold))
+            .frame(height: usesHomeHeaderHeight && expanded ? 52 : nil, alignment: .center)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20)
-            .padding(.top, 4)
+            .padding(.top, topPadding)
             .padding(.bottom, 12)
             .accessibilityAddTraits(.isHeader)
+    }
+}
+
+private struct ZeyingFoldedPortraitHeaderInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+private struct ZeyingExpandedFoldKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var zeyingFoldedPortraitHeaderInset: CGFloat {
+        get { self[ZeyingFoldedPortraitHeaderInsetKey.self] }
+        set { self[ZeyingFoldedPortraitHeaderInsetKey.self] = newValue }
+    }
+
+    var zeyingExpandedFold: Bool {
+        get { self[ZeyingExpandedFoldKey.self] }
+        set { self[ZeyingExpandedFoldKey.self] = newValue }
+    }
+}
+
+/// Place the pane boundary at the fold's reserved region in this view's own
+/// coordinate space, including when a tab rail occupies one side of the screen.
+struct ZeyingFoldAwareSplit<Leading: View, Trailing: View>: View {
+    let leading: Leading
+    let trailing: Trailing
+    let divisionFill: Color
+
+    init(divisionFill: Color = .clear,
+         @ViewBuilder leading: () -> Leading, @ViewBuilder trailing: () -> Trailing) {
+        self.leading = leading()
+        self.trailing = trailing()
+        self.divisionFill = divisionFill
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            if #available(iOS 27.1, *),
+               let division = geometry.reservedRegions(kind: .division, options: .includeInactive)
+                .map(\.frame)
+                .filter({ $0.minX > 0 && $0.maxX < geometry.size.width })
+                .min(by: { abs($0.midX - geometry.size.width / 2) < abs($1.midX - geometry.size.width / 2) }) {
+                HStack(alignment: .top, spacing: 0) {
+                    leading.frame(width: division.minX)
+                    HStack(spacing: 0) {
+                        divisionFill.frame(width: division.width / 2)
+                        Color.clear.frame(width: division.width / 2)
+                    }
+                    .frame(width: division.width)
+                    .ignoresSafeArea(.container, edges: [.top, .bottom])
+                    .accessibilityHidden(true)
+                    trailing.frame(maxWidth: .infinity)
+                }
+            } else {
+                HStack(alignment: .top, spacing: 0) {
+                    leading.frame(maxWidth: .infinity)
+                    trailing.frame(maxWidth: .infinity)
+                }
+            }
+        }
     }
 }
 
@@ -154,7 +237,10 @@ extension View {
 
 extension Date {
     var zeyingYearTitle: String {
-        formatted(.dateTime.year().locale(zeyingDisplayLocale))
+        if Bundle.main.preferredLocalizations.first?.hasPrefix("zh") == true {
+            return String(Calendar(identifier: .gregorian).component(.year, from: self))
+        }
+        return formatted(.dateTime.year().locale(zeyingDisplayLocale))
     }
 
     var zeyingMonthTitle: String {
@@ -199,5 +285,9 @@ extension PHAssetMediaType {
         case .unknown: String(localized: "媒体")
         @unknown default: String(localized: "媒体")
         }
+    }
+
+    var zeyingDetailsTitle: String {
+        self == .video ? String(localized: "视频信息") : String(localized: "照片信息")
     }
 }

@@ -2,6 +2,10 @@ import Photos
 import SwiftUI
 import UIKit
 
+private struct SummaryEditSelection: Hashable, Identifiable {
+    let id: String
+}
+
 struct ReviewSummaryView: View {
     let library: PhotoLibraryService
     let reviews: ReviewStore
@@ -9,15 +13,21 @@ struct ReviewSummaryView: View {
     let albumService: PhotoAlbumService
     let albumAssignments: PendingAlbumAssignmentStore
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .caption) private var albumRowIconSize: CGFloat = 14
     @State private var showingFavoriteConfirmation = false
+    @State private var requestedFavoriteIDs: [String] = []
     @State private var showingDeleteConfirmation = false
     @State private var requestedDeletionIDs: [String] = []
     @State private var deleteAfterPreviewDismissal: String?
+    @State private var editAfterPreviewDismissal: String?
     @State private var isCommitting = false
     @State private var showingError = false
     @State private var showingAlbumConfirmation = false
+    @State private var requestedAlbumIDs: [String] = []
     @State private var operationError: String?
     @State private var previewSelection: SummaryPreviewSelection?
+    @State private var editSelection: SummaryEditSelection?
 
     private var favoriteIDs: [String] {
         reviews.pendingFavoriteIdentifiers
@@ -40,7 +50,8 @@ struct ReviewSummaryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ZeyingRootPageTitle(title: String(localized: "清单"))
+            ZeyingRootPageTitle(title: String(localized: "清单"),
+                                matchesHomeExpandedPosition: true, usesHomeHeaderHeight: true)
 
             Group {
                 if !library.hasLoaded,
@@ -61,7 +72,14 @@ struct ReviewSummaryView: View {
                 }
             }
         }
+        .background(Color(uiColor: .systemBackground).ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(item: $editSelection) { selection in
+            ReviewQueueView(
+                assetIDs: [selection.id], library: library, reviews: reviews, sizes: sizes,
+                albumService: albumService, albumAssignments: albumAssignments
+            )
+        }
         .task {
             await library.ensureLoaded()
         }
@@ -77,8 +95,9 @@ struct ReviewSummaryView: View {
             String(localized: "确认收藏这些项目？"),
             isPresented: $showingFavoriteConfirmation
         ) {
-            Button(String(localized: "确认收藏 \(favoriteIDs.count) 项")) {
-                Task { await commitFavorites() }
+            Button(String(localized: "确认收藏 \(requestedFavoriteIDs.count) 项")) {
+                let identifiers = requestedFavoriteIDs
+                Task { await commitFavorites(identifiers) }
             }
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
@@ -103,7 +122,8 @@ struct ReviewSummaryView: View {
             isPresented: $showingAlbumConfirmation
         ) {
             Button(String(localized: "加入相簿")) {
-                Task { await commitAlbumAssignments() }
+                let identifiers = requestedAlbumIDs
+                Task { await commitAlbumAssignments(identifiers) }
             }
             Button(String(localized: "取消"), role: .cancel) {}
         } message: {
@@ -119,23 +139,61 @@ struct ReviewSummaryView: View {
                 deleteAfterPreviewDismissal = nil
                 requestedDeletionIDs = [identifier]
                 showingDeleteConfirmation = true
+            } else if let identifier = editAfterPreviewDismissal {
+                editAfterPreviewDismissal = nil
+                editSelection = SummaryEditSelection(id: identifier)
             }
         }) { selection in
             if let asset = library.asset(with: selection.assetIdentifier) {
-                SummaryAssetPreviewSheet(assetIDs: selection.assetIdentifiers, initialID: asset.localIdentifier, library: library) { identifier in
+                SummaryAssetPreviewSheet(
+                    assetIDs: selection.assetIdentifiers,
+                    initialID: asset.localIdentifier,
+                    library: library,
+                    albumAssignments: albumAssignments,
+                    actionMode: selection.actionMode
+                ) { identifier in
                     recoverDeletions([identifier])
                     previewSelection = nil
                 } onDelete: { identifier in
                     deleteAfterPreviewDismissal = identifier
                     previewSelection = nil
+                } onEdit: { identifier in
+                    editAfterPreviewDismissal = identifier
+                    previewSelection = nil
+                } onCancelPending: { identifier in
+                    switch selection.actionMode {
+                    case .favorite:
+                        cancelPendingFavorites([identifier])
+                    case .album:
+                        cancelPendingAlbumAssignments([identifier])
+                    case .delete:
+                        return
+                    }
+                    previewSelection = nil
                 }
             } else {
-                UnavailableSummaryPreviewSheet()
+                UnavailableSummaryPreviewSheet(
+                    title: selection.actionMode == .album
+                        ? albumAssignments.assignment(for: selection.assetIdentifier)?.albumTitle
+                            ?? selection.actionMode.defaultTitle
+                        : selection.actionMode.defaultTitle
+                )
             }
         }
     }
 
     private var summaryList: some View {
+        summaryListContent
+        .listStyle(.insetGrouped)
+        .contentMargins(.top, 0, for: .scrollContent)
+        .scrollContentBackground(.hidden)
+        .background(Color(uiColor: .systemBackground))
+        .refreshable {
+            await library.refresh()
+        }
+    }
+
+    private var summaryListContent: some View {
         List {
             PendingLiveConversionsSection(
                 library: library,
@@ -146,30 +204,40 @@ struct ReviewSummaryView: View {
             if !favoriteIDs.isEmpty {
                 Section {
                     ForEach(favoriteIDs, id: \.self) { identifier in
-                        summaryAssetRow(identifier: identifier, decision: .keep)
+                        summaryAssetRow(
+                            identifier: identifier,
+                            decision: .keep,
+                            showsSeparator: identifier != favoriteIDs.last
+                        )
                     }
                 } header: {
-                    HStack {
-                        Label(String(localized: "待收藏"), systemImage: "star.fill")
-                        Spacer()
-                        sectionAction(
-                            String(localized: "收藏"),
-                            accessibilityLabel: String(localized: "确认收藏 \(favoriteIDs.count) 项")
-                        ) {
-                            showingFavoriteConfirmation = true
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            favoriteSectionLabel
+                            Spacer(minLength: 4)
+                            favoriteSectionActions
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            favoriteSectionLabel
+                            HStack {
+                                Spacer()
+                                favoriteSectionActions
+                            }
                         }
                     }
                     .zeyingAlignedGroupedSectionHeader()
                     .textCase(nil)
-                } footer: {
-                    Text(String(localized: "收藏会视为保留，不会删除这些项目。"))
                 }
             }
 
             if !deleteIDs.isEmpty {
                 Section {
                     ForEach(deleteIDs, id: \.self) { identifier in
-                        summaryAssetRow(identifier: identifier, decision: .delete)
+                        summaryAssetRow(
+                            identifier: identifier,
+                            decision: .delete,
+                            showsSeparator: identifier != deleteIDs.last
+                        )
                     }
                 } header: {
                     ViewThatFits(in: .horizontal) {
@@ -194,17 +262,24 @@ struct ReviewSummaryView: View {
             if !albumItems.isEmpty {
                 Section {
                     ForEach(albumItems, id: \.assetIdentifier) { assignment in
-                        albumAssignmentRow(assignment)
+                        albumAssignmentRow(
+                            assignment,
+                            showsSeparator: assignment.assetIdentifier != albumItems.last?.assetIdentifier
+                        )
                     }
                 } header: {
-                    HStack {
-                        Label(String(localized: "待整理相簿"), systemImage: "rectangle.stack.badge.plus")
-                        Spacer()
-                        sectionAction(
-                            String(localized: "加入相簿"),
-                            accessibilityLabel: String(localized: "确认加入相簿，\(albumItems.count) 项")
-                        ) {
-                            showingAlbumConfirmation = true
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) {
+                            albumSectionLabel
+                            Spacer(minLength: 4)
+                            albumSectionActions
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            albumSectionLabel
+                            HStack {
+                                Spacer()
+                                albumSectionActions
+                            }
                         }
                     }
                     .zeyingAlignedGroupedSectionHeader()
@@ -236,7 +311,7 @@ struct ReviewSummaryView: View {
                         }
                     }
                     .padding(.vertical, 4)
-                    .listRowBackground(Color.clear)
+                    .listRowBackground(Color(uiColor: .secondarySystemBackground))
                 } header: {
                     Label(String(localized: "不可访问的相簿整理（\(unavailableAlbumItems.count)）"), systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
@@ -244,17 +319,60 @@ struct ReviewSummaryView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .refreshable {
-            await library.refresh()
-        }
     }
 
     private var deleteSectionLabel: some View {
         Label(String(localized: "待删除"), systemImage: "trash.fill")
             .foregroundStyle(.red)
             .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var favoriteSectionLabel: some View {
+        Label(String(localized: "待收藏"), systemImage: "star.fill")
+            .foregroundStyle(.yellow)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var favoriteSectionActions: some View {
+        HStack(spacing: 6) {
+            sectionAction(
+                String(localized: "全部取消收藏"),
+                accessibilityLabel: String(localized: "取消所有待收藏项目")
+            ) {
+                cancelPendingFavorites(favoriteIDs)
+            }
+            sectionAction(
+                String(localized: "收藏"),
+                accessibilityLabel: String(localized: "确认收藏 \(favoriteIDs.count) 项")
+            ) {
+                requestedFavoriteIDs = favoriteIDs
+                showingFavoriteConfirmation = true
+            }
+        }
+    }
+
+    private var albumSectionLabel: some View {
+        Label(String(localized: "待整理相簿"), systemImage: "rectangle.stack.badge.plus")
+            .foregroundStyle(.blue)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var albumSectionActions: some View {
+        HStack(spacing: 6) {
+            sectionAction(
+                String(localized: "全部不加入"),
+                accessibilityLabel: String(localized: "取消所有待加入相簿项目")
+            ) {
+                cancelPendingAlbumAssignments(albumAssignments.assignments.map(\.assetIdentifier))
+            }
+            sectionAction(
+                String(localized: "加入相簿"),
+                accessibilityLabel: String(localized: "确认加入相簿，\(albumItems.count) 项")
+            ) {
+                requestedAlbumIDs = albumItems.map(\.assetIdentifier)
+                showingAlbumConfirmation = true
+            }
+        }
     }
 
     private var deleteSectionActions: some View {
@@ -294,13 +412,21 @@ struct ReviewSummaryView: View {
     }
 
     @ViewBuilder
-    private func summaryAssetRow(identifier: String, decision: ReviewDecision) -> some View {
+    private func summaryAssetRow(
+        identifier: String,
+        decision: ReviewDecision,
+        showsSeparator: Bool
+    ) -> some View {
         if let asset = library.asset(with: identifier) {
             let isDeletion = decision == .delete
             if isDeletion {
                 HStack(spacing: 10) {
                     Button {
-                        previewSelection = SummaryPreviewSelection(assetIdentifier: identifier, assetIdentifiers: deleteIDs)
+                        previewSelection = SummaryPreviewSelection(
+                            assetIdentifier: identifier,
+                            assetIdentifiers: deleteIDs,
+                            actionMode: .delete
+                        )
                     } label: {
                         summaryAssetRowContent(asset: asset, isDeletion: true, trailingTitle: nil)
                     }
@@ -308,38 +434,42 @@ struct ReviewSummaryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .disabled(isCommitting)
-                    .accessibilityLabel(String(localized: "查看这个待删除项目的预览"))
+                    .accessibilityLabel(String(localized: "预览待删除\(pendingAssetDescription(asset))"))
 
-                    Button {
+                    summaryRowAction(String(localized: "恢复"), labelWidth: regularRowActionLabelWidth) {
                         recoverDeletions([identifier])
-                    } label: {
-                        Text(String(localized: "恢复"))
-                            .font(.caption.weight(.semibold))
-                            .fixedSize(horizontal: true, vertical: false)
                     }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .controlSize(.small)
-                    .tint(.blue)
-                    .disabled(isCommitting)
-                    .accessibilityLabel(asset.mediaType == .video
-                        ? String(localized: "恢复这段待删除视频")
-                        : String(localized: "恢复这张待删除照片"))
+                    .frame(width: rowActionColumnWidth)
+                    .accessibilityLabel(String(localized: "恢复待删除\(pendingAssetDescription(asset))"))
                 }
+                .listRowSeparator(.hidden, edges: .top)
+                .listRowSeparator(showsSeparator ? .visible : .hidden, edges: .bottom)
+                .listRowBackground(Color(uiColor: .secondarySystemBackground))
             } else {
-                NavigationLink {
-                    ReviewQueueView(
-                        assetIDs: [identifier],
-                        library: library,
-                        reviews: reviews,
-                        sizes: sizes,
-                        albumService: albumService,
-                        albumAssignments: albumAssignments
-                    )
-                } label: {
-                    summaryAssetRowContent(asset: asset, isDeletion: false, trailingTitle: String(localized: "修改"))
+                HStack(alignment: .center, spacing: 10) {
+                    Button {
+                        previewSelection = SummaryPreviewSelection(
+                            assetIdentifier: identifier,
+                            assetIdentifiers: favoriteIDs,
+                            actionMode: .favorite
+                        )
+                    } label: {
+                        summaryAssetRowContent(asset: asset, isDeletion: false, trailingTitle: nil)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .disabled(isCommitting)
+
+                    pendingRowActions(cancelTitle: String(localized: "取消收藏")) {
+                        editSelection = SummaryEditSelection(id: identifier)
+                    } onCancel: {
+                        cancelPendingFavorites([identifier])
+                    }
                 }
-                .accessibilityLabel(String(localized: "编辑待收藏项目"))
+                .listRowSeparator(.hidden, edges: .top)
+                .listRowSeparator(showsSeparator ? .visible : .hidden, edges: .bottom)
+                .listRowBackground(Color(uiColor: .secondarySystemBackground))
             }
         }
     }
@@ -360,13 +490,13 @@ struct ReviewSummaryView: View {
                     .font(.subheadline.weight(.medium))
                 HStack(spacing: 5) {
                     Image(systemName: isDeletion ? "trash" : "star")
-                        .foregroundStyle(isDeletion ? .red : .orange)
+                        .foregroundStyle(isDeletion ? .red : .yellow)
                     Text(isDeletion
                          ? (LivePhotoConversionManager.shared.conversion(for: asset.localIdentifier) == nil
                             ? String(localized: "待删除")
                             : String(localized: "原实况照片 · 待删除"))
                          : String(localized: "待收藏"))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isDeletion ? Color(uiColor: .secondaryLabel) : .yellow)
                 }
                 .font(.caption)
             }
@@ -380,6 +510,14 @@ struct ReviewSummaryView: View {
         .contentShape(Rectangle())
     }
 
+    private func pendingAssetDescription(_ asset: PHAsset) -> String {
+        let type = asset.mediaType == .video ? String(localized: "视频")
+            : asset.mediaSubtypes.contains(.photoLive) ? String(localized: "实况照片") : String(localized: "照片")
+        let date = asset.creationDate?.zeyingDetailedDate ?? String(localized: "日期未知")
+        let position = (deleteIDs.firstIndex(of: asset.localIdentifier) ?? 0) + 1
+        return String(localized: "\(type)，\(date)，第 \(position) 项")
+    }
+
     private func recoverDeletions(_ identifiers: [String]) {
         guard reviews.recoverPendingDeletions(identifiers) else {
             operationError = reviews.errorMessage ?? String(localized: "无法恢复待删除项目。")
@@ -388,63 +526,139 @@ struct ReviewSummaryView: View {
         }
     }
 
-    @ViewBuilder
-    private func albumAssignmentRow(_ assignment: PendingAlbumAssignment) -> some View {
-        if let asset = library.asset(with: assignment.assetIdentifier) {
-            NavigationLink {
-                ReviewQueueView(
-                    assetIDs: [assignment.assetIdentifier],
-                    library: library,
-                    reviews: reviews,
-                    sizes: sizes,
-                    albumService: albumService,
-                    albumAssignments: albumAssignments
-                )
-            } label: {
-                HStack(spacing: 12) {
-                    AssetImageView(
-                        asset: asset,
-                        library: library,
-                        contentMode: .fill,
-                        allowNetwork: false
-                    )
-                        .frame(width: 60, height: 60)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    private var rowActionColumnWidth: CGFloat {
+        dynamicTypeSize.isAccessibilitySize ? 148 : 100
+    }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(asset.creationDate?.zeyingShortDate ?? String(localized: "日期未知"))
-                            .font(.subheadline.weight(.medium))
-                        Label(
-                            assignment.isNewAlbum ? String(localized: "新建：\(assignment.albumTitle)") : assignment.albumTitle,
-                            systemImage: assignment.isNewAlbum ? "plus.rectangle" : "rectangle.stack"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                    }
-                    Spacer()
-                    Text(String(localized: "修改"))
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                Button(role: .destructive) {
-                    _ = albumAssignments.remove(assetIdentifier: assignment.assetIdentifier)
-                } label: {
-                    Label(String(localized: "移除"), systemImage: "trash")
-                }
-            }
-            .accessibilityLabel(String(localized: "编辑加入相簿 \(assignment.albumTitle) 的项目"))
+    private var regularRowActionLabelWidth: CGFloat {
+        dynamicTypeSize.isAccessibilitySize ? 130 : 80
+    }
+
+    private func pendingRowActions(
+        cancelTitle: String,
+        onEdit: @escaping () -> Void,
+        onCancel: @escaping () -> Void
+    ) -> some View {
+        let enlarged = dynamicTypeSize.isAccessibilitySize
+        let labelWidth: CGFloat = enlarged ? 130 : 84
+        return VStack(alignment: .center, spacing: 4) {
+            summaryRowAction(String(localized: "修改"), labelWidth: labelWidth,
+                             compact: !enlarged, action: onEdit)
+            summaryRowAction(cancelTitle, labelWidth: labelWidth,
+                             compact: !enlarged, action: onCancel)
+        }
+        .frame(width: rowActionColumnWidth)
+    }
+
+    private func summaryRowAction(
+        _ title: String,
+        labelWidth: CGFloat? = nil,
+        compact: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .fixedSize(horizontal: labelWidth == nil, vertical: false)
+                .frame(width: labelWidth, height: compact ? 16 : nil)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .controlSize(compact ? .mini : .small)
+        .tint(.gray)
+        .disabled(isCommitting)
+    }
+
+    private func cancelPendingFavorites(_ identifiers: [String]) {
+        guard reviews.cancelPendingFavorites(identifiers) else {
+            operationError = reviews.errorMessage ?? String(localized: "无法取消待收藏项目。")
+            showingError = true
+            return
         }
     }
 
-    private func commitFavorites() async {
-        guard !favoriteIDs.isEmpty else { return }
+    private func cancelPendingAlbumAssignments(_ identifiers: [String]) {
+        let selected = Set(identifiers)
+        let requested = albumAssignments.assignments.filter { selected.contains($0.assetIdentifier) }
+        guard !requested.isEmpty else { return }
+        for assignment in requested where reviews.decision(for: assignment.assetIdentifier) != .keep {
+            guard reviews.decide(.keep, for: assignment.assetIdentifier) else {
+                operationError = reviews.errorMessage ?? String(localized: "无法保留照片。")
+                showingError = true
+                return
+            }
+        }
+        guard albumAssignments.removeApplied(requested.map(\.assetIdentifier)) else {
+            operationError = albumAssignments.errorMessage ?? String(localized: "无法取消相簿整理。")
+            showingError = true
+            return
+        }
+    }
+
+    @ViewBuilder
+    private func albumAssignmentRow(
+        _ assignment: PendingAlbumAssignment,
+        showsSeparator: Bool
+    ) -> some View {
+        if let asset = library.asset(with: assignment.assetIdentifier) {
+            HStack(alignment: .center, spacing: 10) {
+                Button {
+                    previewSelection = SummaryPreviewSelection(
+                        assetIdentifier: assignment.assetIdentifier,
+                        assetIdentifiers: albumItems.map(\.assetIdentifier),
+                        actionMode: .album
+                    )
+                } label: {
+                    albumAssignmentRowContent(asset: asset, assignment: assignment)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .disabled(isCommitting)
+
+                pendingRowActions(cancelTitle: String(localized: "不加入相簿")) {
+                    editSelection = SummaryEditSelection(id: assignment.assetIdentifier)
+                } onCancel: {
+                    cancelPendingAlbumAssignments([assignment.assetIdentifier])
+                }
+            }
+            .listRowSeparator(.hidden, edges: .top)
+            .listRowSeparator(showsSeparator ? .visible : .hidden, edges: .bottom)
+            .listRowBackground(Color(uiColor: .secondarySystemBackground))
+        }
+    }
+
+    private func albumAssignmentRowContent(asset: PHAsset, assignment: PendingAlbumAssignment) -> some View {
+        HStack(spacing: 12) {
+            AssetImageView(asset: asset, library: library, contentMode: .fill, allowNetwork: false)
+                .frame(width: 60, height: 60)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(asset.creationDate?.zeyingShortDate ?? String(localized: "日期未知"))
+                    .font(.subheadline.weight(.medium))
+                HStack(spacing: 5) {
+                    Image(systemName: assignment.isNewAlbum ? "plus.rectangle" : "rectangle.stack")
+                        .font(.system(size: albumRowIconSize))
+                    Text(assignment.isNewAlbum ? String(localized: "新建：\(assignment.albumTitle)") : assignment.albumTitle)
+                }
+                .font(.caption)
+                .foregroundStyle(.blue)
+                .accessibilityElement(children: .combine)
+            }
+            Spacer()
+        }
+    }
+
+    private func commitFavorites(_ identifiers: [String]) async {
+        let requested = Array(Set(identifiers).intersection(favoriteIDs)).sorted()
+        guard !requested.isEmpty else { return }
         isCommitting = true
         defer { isCommitting = false }
 
         do {
-            let succeeded = try await library.favorite(favoriteIDs)
+            let succeeded = try await library.favorite(requested)
             guard reviews.markFavorited(succeeded) else {
                 operationError = reviews.errorMessage ?? String(localized: "无法保存收藏进度。")
                 showingError = true
@@ -456,8 +670,9 @@ struct ReviewSummaryView: View {
         }
     }
 
-    private func commitAlbumAssignments() async {
-        let requested = albumItems
+    private func commitAlbumAssignments(_ identifiers: [String]) async {
+        let selected = Set(identifiers)
+        let requested = albumItems.filter { selected.contains($0.assetIdentifier) }
         guard !requested.isEmpty else { return }
         isCommitting = true
         defer { isCommitting = false }
@@ -592,13 +807,29 @@ struct ReviewSummaryView: View {
     }
 }
 
+private enum SummaryPreviewActionMode: Equatable {
+    case delete
+    case favorite
+    case album
+
+    var defaultTitle: String {
+        switch self {
+        case .delete: String(localized: "待删除")
+        case .favorite: String(localized: "待收藏")
+        case .album: String(localized: "待整理相簿")
+        }
+    }
+}
+
 private struct SummaryPreviewSelection: Identifiable {
     let assetIdentifier: String
     let assetIdentifiers: [String]
+    let actionMode: SummaryPreviewActionMode
     var id: String { assetIdentifier }
 }
 
 private struct UnavailableSummaryPreviewSheet: View {
+    let title: String
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -608,7 +839,7 @@ private struct UnavailableSummaryPreviewSheet: View {
                 systemImage: "photo.on.rectangle.angled",
                 description: Text(String(localized: "这条本地待办会保留；调整照片访问权限后可以再次查看。"))
             )
-            .navigationTitle(String(localized: "媒体预览"))
+            .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -623,8 +854,12 @@ private struct UnavailableSummaryPreviewSheet: View {
 private struct SummaryAssetPreviewSheet: View {
     let assetIDs: [String]
     let library: PhotoLibraryService
+    let albumAssignments: PendingAlbumAssignmentStore
+    let actionMode: SummaryPreviewActionMode
     let onRecover: (String) -> Void
     let onDelete: (String) -> Void
+    let onEdit: (String) -> Void
+    let onCancelPending: (String) -> Void
 
     @Environment(AppSettings.self) private var settings
     @Environment(\.dismiss) private var dismiss
@@ -635,102 +870,159 @@ private struct SummaryAssetPreviewSheet: View {
     @State private var panStartOffset: CGSize = .zero
     @State private var videoSoundEnabled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    private var usesExpandedPreviewLayout: Bool {
+        (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
+    }
+
+    private var previewLayout: AnyLayout {
+        usesExpandedPreviewLayout
+            ? AnyLayout(HStackLayout(spacing: 0))
+            : AnyLayout(VStackLayout(spacing: 0))
+    }
+
+    private var previewTitle: String {
+        if actionMode == .album,
+           let albumTitle = albumAssignments.assignment(for: selectedID)?.albumTitle,
+           !albumTitle.isEmpty {
+            return albumTitle
+        }
+        return actionMode.defaultTitle
+    }
 
     init(assetIDs: [String], initialID: String, library: PhotoLibraryService,
-         onRecover: @escaping (String) -> Void, onDelete: @escaping (String) -> Void) {
+         albumAssignments: PendingAlbumAssignmentStore,
+         actionMode: SummaryPreviewActionMode,
+         onRecover: @escaping (String) -> Void,
+         onDelete: @escaping (String) -> Void,
+         onEdit: @escaping (String) -> Void,
+         onCancelPending: @escaping (String) -> Void) {
         self.assetIDs = assetIDs
         self.library = library
+        self.albumAssignments = albumAssignments
+        self.actionMode = actionMode
         self.onRecover = onRecover
         self.onDelete = onDelete
+        self.onEdit = onEdit
+        self.onCancelPending = onCancelPending
         _selectedID = State(initialValue: initialID)
     }
 
     var body: some View {
         NavigationStack {
-            GeometryReader { proxy in
-                ZStack {
-                    Color.black.ignoresSafeArea()
-                    if let asset = library.asset(with: selectedID), asset.mediaType == .video {
-                        AssetPreviewView(
-                            asset: asset,
-                            library: library,
-                            videoSoundEnabled: $videoSoundEnabled,
-                            initialPreview: library.cachedQuickPreview(for: asset),
-                            cornerRadius: 0
-                        )
-                        .id(asset.localIdentifier)
-                    } else if let asset = library.asset(with: selectedID) {
-                        AssetImageView(
-                            asset: asset,
-                            library: library,
-                            contentMode: .fit,
-                            allowNetwork: settings.iCloudAutoDownloadEnabled,
-                            targetSize: CGSize(width: 1_500, height: 1_500),
-                            requiresFullQuality: true
-                        )
-                        .id(asset.localIdentifier)
-                        .scaleEffect(scale)
-                        .offset(offset)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .contentShape(Rectangle())
-                        .simultaneousGesture(magnificationGesture)
-                        .simultaneousGesture(panGesture(in: proxy.size))
-                        .onTapGesture(count: 2) {
-                            setScale(scale > 1.01 ? 1 : 2)
+            previewLayout {
+                GeometryReader { proxy in
+                    ZStack {
+                        Color.black.ignoresSafeArea()
+                        if let asset = library.asset(with: selectedID), asset.mediaType == .video {
+                            AssetPreviewView(
+                                asset: asset,
+                                library: library,
+                                videoSoundEnabled: $videoSoundEnabled,
+                                initialPreview: library.cachedQuickPreview(for: asset),
+                                autoplayVideo: true,
+                                cornerRadius: 0
+                            )
+                            .id(asset.localIdentifier)
+                        } else if let asset = library.asset(with: selectedID) {
+                            AssetImageView(
+                                asset: asset,
+                                library: library,
+                                contentMode: .fit,
+                                allowNetwork: settings.iCloudAutoDownloadEnabled,
+                                targetSize: CGSize(width: 1_500, height: 1_500),
+                                requiresFullQuality: true,
+                                allowCloudThumbnail: true
+                            )
+                            .id(asset.localIdentifier)
+                            .scaleEffect(scale)
+                            .offset(offset)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .contentShape(Rectangle())
+                            .simultaneousGesture(magnificationGesture)
+                            .simultaneousGesture(panGesture(in: proxy.size))
+                            .onTapGesture(count: 2) {
+                                setScale(scale > 1.01 ? 1 : 2)
+                            }
+                            .accessibilityValue(String(localized: "缩放 \(Int(scale * 100))%"))
+                            .accessibilityAction(named: String(localized: "放大")) { setScale(min(scale + 1, 4)) }
+                            .accessibilityAction(named: String(localized: "缩小")) { setScale(max(scale - 1, 1)) }
+                            .accessibilityAction(named: String(localized: "恢复原始大小")) { setScale(1) }
                         }
-                    }
 
-                    if let asset = library.asset(with: selectedID), asset.mediaType == .video {
-                        VStack {
-                            Spacer()
-                            Text(String(localized: "点按播放后加载视频内容；关闭可返回清单。"))
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.82))
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(.black.opacity(0.45), in: Capsule())
-                                .padding(.bottom, 18)
-                        }
-                        .allowsHitTesting(false)
                     }
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 25).onEnded { value in
+                            guard scale <= 1.01,
+                                  abs(value.translation.width) >= 70,
+                                  abs(value.translation.width) > abs(value.translation.height) * 1.4 else { return }
+                            movePreview(value.translation.width < 0 ? 1 : -1)
+                        }
+                    )
                 }
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 25).onEnded { value in
-                        guard scale <= 1.01,
-                              abs(value.translation.width) >= 70,
-                              abs(value.translation.width) > abs(value.translation.height) * 1.4 else { return }
-                        movePreview(value.translation.width < 0 ? 1 : -1)
-                    }
-                )
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                HStack(spacing: 14) {
-                    Button { onRecover(selectedID) } label: {
-                        Label(String(localized: "恢复"), systemImage: "arrow.uturn.backward")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .controlSize(.regular)
-                    .tint(.white)
+                VStack(spacing: 14) {
+                    if actionMode == .delete {
+                        Button { onRecover(selectedID) } label: {
+                            Label(String(localized: "恢复"), systemImage: "arrow.uturn.backward")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .tint(.white)
 
-                    Button(role: .destructive) { onDelete(selectedID) } label: {
-                        Label(String(localized: "删除"), systemImage: "trash")
+                        Button(role: .destructive) { onDelete(selectedID) } label: {
+                            Label(String(localized: "删除"), systemImage: "trash")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .tint(.red)
+                    } else {
+                        Button { onEdit(selectedID) } label: {
+                            Label(String(localized: "修改"), systemImage: "pencil")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .tint(.white)
+
+                        Button { onCancelPending(selectedID) } label: {
+                            Label(
+                                actionMode == .favorite
+                                    ? String(localized: "取消收藏")
+                                    : String(localized: "不加入相簿"),
+                                systemImage: actionMode == .favorite ? "star.slash" : "rectangle.stack.badge.minus"
+                            )
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .tint(.white)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
-                    .controlSize(.regular)
-                    .tint(.red)
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 10)
                 .background(.black)
+                .frame(minWidth: usesExpandedPreviewLayout ? 210 : nil,
+                       idealWidth: usesExpandedPreviewLayout ? 250 : nil,
+                       maxWidth: usesExpandedPreviewLayout ? 290 : .infinity)
+                .frame(maxHeight: usesExpandedPreviewLayout ? .infinity : nil, alignment: .center)
             }
-            .navigationTitle(String(localized: "媒体预览"))
+            .background(.black)
+            .navigationTitle(previewTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
@@ -744,7 +1036,6 @@ private struct SummaryAssetPreviewSheet: View {
                 pinchStartScale = 1
                 offset = .zero
                 panStartOffset = .zero
-                videoSoundEnabled = false
             }
             .task(id: selectedID, priority: .utility) {
                 await prefetchAdjacentPreviews()

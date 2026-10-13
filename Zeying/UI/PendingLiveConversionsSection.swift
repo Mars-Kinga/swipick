@@ -6,10 +6,18 @@ struct PendingLiveConversionsSection: View {
     let reviews: ReviewStore
     let albumAssignments: PendingAlbumAssignmentStore
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var selected: LivePhotoConversion?
     private let conversions = LivePhotoConversionManager.shared
     private var visibleConversions: [LivePhotoConversion] {
         conversions.visiblePendingConversions(reviews: reviews)
+    }
+
+    private var usesExpandedListLayout: Bool {
+        (horizontalSizeClass == .regular || verticalSizeClass == .compact) &&
+            !dynamicTypeSize.isAccessibilitySize
     }
 
     var body: some View {
@@ -19,6 +27,7 @@ struct PendingLiveConversionsSection: View {
                     .font(.subheadline)
                     .foregroundStyle(.orange)
                     .padding(.vertical, 4)
+                    .listRowBackground(Color(uiColor: .secondarySystemBackground))
             } header: {
                 Text(String(localized: "静态转换记录需要检查"))
                     .zeyingAlignedGroupedSectionHeader()
@@ -40,12 +49,14 @@ struct PendingLiveConversionsSection: View {
                                     contentMode: .fill,
                                     allowNetwork: false
                                 )
-                                    .frame(width: 60, height: 60)
+                                    .frame(width: usesExpandedListLayout ? 88 : 60,
+                                           height: usesExpandedListLayout ? 88 : 60)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             } else {
                                 Image(systemName: "livephoto.slash")
                                     .font(.title3)
-                                    .frame(width: 60, height: 60)
+                                    .frame(width: usesExpandedListLayout ? 88 : 60,
+                                           height: usesExpandedListLayout ? 88 : 60)
                                     .background(.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
                             }
 
@@ -58,13 +69,20 @@ struct PendingLiveConversionsSection: View {
                                     .foregroundStyle(statusColor(for: record))
                             }
                             Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
+                            if usesExpandedListLayout {
+                                Label(String(localized: "继续转换"), systemImage: "arrow.right")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(width: 150)
+                            } else {
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(String(localized: "继续实况照片转静态：\(record.creationDate.zeyingShortDate)"))
+                    .listRowBackground(Color(uiColor: .secondarySystemBackground))
                 }
             } header: {
                 Label(String(localized: "待完成静态转换"), systemImage: "livephoto.slash")

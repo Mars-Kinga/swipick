@@ -26,11 +26,30 @@ Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，
 
 截图来自实际使用，展示浅色模式下的首页、照片审核与清理建议。图中的数量仅代表拍摄时的个人图库状态。
 
+### iPhone Duo · 宽屏布局
+
+<p align="center">
+  <img src="docs/screenshots/iphone-duo-home.png" width="760" alt="iPhone Duo 首页宽屏布局：左侧显示统计与继续审核，右侧显示月份、相簿与类型入口">
+</p>
+<p align="center">首页 · Home</p>
+
+<p align="center">
+  <img src="docs/screenshots/iphone-duo-suggestions.png" width="760" alt="iPhone Duo 建议双栏布局：左侧为建议分组，右侧为照片比较与保留选择">
+</p>
+<p align="center">建议与组内比较 · Suggestions and Comparison</p>
+
+<p align="center">
+  <img src="docs/screenshots/iphone-duo-review.png" width="760" alt="iPhone Duo 照片审核宽屏布局：中央媒体预览，两侧审核按钮和右侧导航">
+</p>
+<p align="center">照片审核 · Photo Review</p>
+
+以上为 iPhone Duo 模拟器截图。宽屏下首页按内容分栏，建议列表与组内比较并列显示，照片审核将操作分置两侧，导航收于右侧；窄屏仍保留逐张卡片与底部导航。
+
 ## 项目亮点 · Engineering Highlights
 
-- **从产品流程到原生实现**：围绕“筛选 → 判断 → 确认”组织界面，支持手势审核、可撤销决定和跨次继续。
+- **从产品流程到原生实现**：围绕“筛选 → 判断 → 确认”组织界面，支持手势审核、可撤销决定和跨次继续；按可用宽度切换窄屏卡片与 iPhone Duo 分栏布局。
 - **本机 AI 与保留推荐**：结合 Vision 图像特征、OCR 和美学评分生成清理建议，用 SHA-256 核对重复原件；相似组优先评分，结合人像成像质量展示保留推荐及依据，由用户决定最终操作。
-- **图库操作可靠性**：将本地审核记录与 PhotoKit 写入分离，为 Live Photo 转换保存恢复记录，并在删除原件前核对副本。
+- **图库操作可靠性**：将本地审核记录与 PhotoKit 写入分离，为 Live Photo 转换保存恢复记录，静态副本继承收藏，并在删除原件前核对副本。
 - **缓存、后台处理与功耗控制**：SQLite 按照片增量保存分析结果并接续处理；按充电、低电量模式和温度调整后台工作量与节奏，建议扫描仅读取本机资源。提供中英文资源与行为测试。
 
 ## 从选择到确认
@@ -52,18 +71,19 @@ Swipick 是一个个人 iOS App 项目：用左右滑动整理照片与视频，
 | 整理图库 | 暂存收藏与目标相簿，清单确认后提交；支持新建相簿 |
 | Live Photo 转静态 | 创建并核对静态副本，保留拍摄时间与可写个人相簿；原件加入待删清单，统一确认 |
 | 持续清理 | 本地进度、继续审核入口、照片和视频删除统计、转换统计 |
+| 宽屏适配 | iPhone Duo 首页分栏、建议与比较双栏、审核两侧操作及右侧导航 |
 | 首次使用 | 照片权限入口、可跳过的使用指南、中英文资源与触觉设置 |
 
 ## 技术实现
 
 - **后台图库快照**：图库与相簿枚举、月份和类型索引在后台准备；合并短时间内的 PhotoKit 变更，复用未变化的相簿成员与预览。`UI` 负责展示，`Library` 封装媒体服务，`Core` 管理状态与预算策略。
 - **决定与图库写入分离**：SwiftData 保存审核决定和待办，用户确认后才提交对应的系统操作。
-- **预览按需加载**：正常状态准备后续 2 张清晰预览、3 张快速预览及最多 1 个本地视频；热压力、低电量模式和内存警告下缩减预算。相簿成员变化时复用未改变像素的预览缓存，避免重复解码。云端照片先尝试本地缩略图，必要时请求当前照片的低清小图。开启自动下载后再升级当前照片为高清，不预下载后续云端原片。Live Photo 动态内容在长按时加载，视频与文件大小获取独立处理。
+- **预览按需加载**：正常状态准备后续 2 张清晰预览、3 张快速预览及最多 1 个本地视频；热压力、低电量模式和内存警告下缩减预算。相簿成员变化时复用未改变像素的预览缓存，避免重复解码。云端照片先尝试本地缩略图，必要时请求当前照片的低清小图。开启自动下载后再升级当前照片为高清，不预下载后续云端原片。Live Photo 动态内容在长按时加载，视频与文件大小获取独立处理。手动暂停及声音偏好在本次审核会话恢复；播放器控件和全屏操作不会触发照片分类。
 - **首屏与视频过渡**：首次加载先准备分类索引和可见相簿封面，云端封面超时后允许稍后出现；视频封面保留至首帧就绪再淡入，减少动态效果设置下减少过渡。
 - **转换与中断恢复**：Live Photo 转换记录持久化，核对副本后将原件暂存到待删清单，批量删除前再次核验副本；副本缺失、变更或也被列入待删时阻止提交。转换中断后尝试恢复。
 - **文件大小缓存**：按照片修改时间缓存已读取的大小，自动读取本地资源时不主动下载 iCloud 原片。
 - **本机推荐分析**：Vision 图像特征与截图 OCR 筛选照片组，SHA-256 完整资源哈希确认重复；相似组支持多张比较，资源不同的相近版本可同时保留。进入组时优先调用 `VNCalculateImageAestheticsScoresRequest`，不等待整库分析完成。已有收藏或保留决定优先受到保护；评分齐全且有优势时给出推荐，分数接近时参考分辨率，无可靠依据时不强行推荐。对打开的人像比较组按需检测面部与成像质量，给出可解释的参考；较大组可建议保留多张有差异的照片。
-- **建议排序与扫描续接**：支持推荐顺序、由新到旧和由旧到新，并保存选择；新照片优先从已有缓存接续分析。按建议类别累计完成与跳过次数，轻量调整推荐顺序，可重置，不保存照片标识或改变保留、删除决定。90 天门槛只用于旧截图，相似照片不受这一期限限制；已保留照片仍可参与比较并受到保护。
+- **建议排序与扫描续接**：支持推荐顺序、由新到旧和由旧到新，并保存选择；推荐分类按已确认副本、相似照片或版本、临时截图排列，学习仅调整同类顺序；新照片优先从已有缓存接续分析。按建议类别累计完成与跳过次数，轻量调整推荐顺序，可重置，不保存照片标识或改变保留、删除决定。90 天门槛只用于旧截图，相似照片不受这一期限限制；已保留照片仍可参与比较并受到保护。
 - **临时截图识别**：截图需要同时有超过 90 天的拍摄时间和临时内容证据，按订单结果、取件码、验证码、已送达物流、过期活动与优惠券分类，沿用逐张审核。
 - **缓存与后台处理**：分析结果使用 SQLite 按照片增量写入，旧 JSON 缓存经事务导入与读取核验后迁移；跳过记录和继续审核进度仍保存在本机。复用未变化的分组结果，并在用户操作时暂缓非交互分析。分别提交充电与未充电后台任务；充电时放宽单轮数量限制，未充电时采用小批量和较慢节奏。前后台在 Serious/Critical 热状态暂停自动扫描，Fair 温度或低电量模式下降速，稳定降温后继续；内存警告时收缩预览缓存。Vision 特征与距离使用有容量限制的 LRU 缓存，减少重复解档与比较；系统仍决定执行窗口，充电不保证整晚持续扫描。建议分析不主动下载 iCloud 原片。
 - **行为测试**：使用 Swift Testing 覆盖审核持久化、撤销、收藏与删除互斥、相簿待办、继续审核状态、设置和滑动判定等逻辑。
@@ -121,6 +141,6 @@ Tools/             图标生成工具
 
 **Swipick** is a personal native iOS project for reviewing photos and videos one at a time. Swipe left to queue deletion, swipe right to keep, or defer a decision for later. Review choices stay on the device; queued deletions, favorites and album assignments are confirmed before being written to the system photo library.
 
-Built with **SwiftUI, PhotoKit, SwiftData, Vision and CryptoKit**, the app includes month, year and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. On-device suggestions combine Vision feature extraction, OCR, aesthetic scoring and SHA-256 hashing to group similar photos, recommend images to keep, and identify duplicate originals and outdated temporary screenshots. Opened groups receive priority aesthetic and face-capture quality analysis; larger groups can suggest multiple distinct keepers. Recommendations remain advisory. Suggestion ordering can follow chronology or local aggregate completion and skip history, which can be reset. Converted Live Photo originals are queued for batch deletion only after copy verification, with a second check before committing the deletion. A per-asset SQLite cache supports incremental analysis writes and migration from the previous JSON cache. Unchanged group results and media previews are reused, and non-interactive analysis yields during review actions. Cached analysis resumes across sessions; background work adjusts its batch size and pace according to charging, Low Power Mode and thermal conditions. Library snapshots and scope indexes are prepared off the main thread, while bounded LRU caches reuse Vision feature prints and distances. Preview budgets shrink under thermal or memory pressure; automatic analysis pauses at serious or critical thermal states. Video covers remain visible until the first frame is ready. iOS controls background execution windows, and suggestion scans do not download iCloud originals. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included.
+Built with **SwiftUI, PhotoKit, SwiftData, Vision and CryptoKit**, the app includes month, year and album filters, undo, resumable review sessions, video and Live Photo previews, file-size caching, and Live Photo-to-still conversion with persisted recovery state. On-device suggestions combine Vision feature extraction, OCR, aesthetic scoring and SHA-256 hashing to group similar photos, recommend images to keep, and identify duplicate originals and outdated temporary screenshots. Opened groups receive priority aesthetic and face-capture quality analysis; larger groups can suggest multiple distinct keepers. Recommendations remain advisory. Suggestion ordering can follow chronology or local aggregate completion and skip history, which can be reset. Converted Live Photo originals are queued for batch deletion only after copy verification, with a second check before committing the deletion. A per-asset SQLite cache supports incremental analysis writes and migration from the previous JSON cache. Unchanged group results and media previews are reused, and non-interactive analysis yields during review actions. Cached analysis resumes across sessions; background work adjusts its batch size and pace according to charging, Low Power Mode and thermal conditions. Library snapshots and scope indexes are prepared off the main thread, while bounded LRU caches reuse Vision feature prints and distances. Preview budgets shrink under thermal or memory pressure; automatic analysis pauses at serious or critical thermal states. Video covers remain visible until the first frame is ready. iOS controls background execution windows, and suggestion scans do not download iCloud originals. Its interface combines Liquid Glass with stacked review cards and haptic feedback. Chinese and English localization resources are included. Adaptive iPhone Duo layouts place home content in columns, show suggestions beside the comparison view, and move review actions to the sides with navigation on the right. The screenshots above were captured in the iPhone Duo simulator.
 
 To run it, open `Zeying.xcodeproj` in an Xcode version supporting the iOS 26 SDK, select the `Zeying` scheme, and choose a simulator or your iPhone. Device installation requires configuring your development team and bundle identifier. The minimum deployment target is **iOS 26.0**. Run the included Swift Testing tests through **Product → Test** in Xcode.
