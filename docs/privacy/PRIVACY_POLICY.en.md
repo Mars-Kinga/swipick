@@ -2,7 +2,7 @@
 
 **Effective date: October 13, 2026**
 
-Swipick is a photo and video review app. This policy explains what the app reads, what it keeps on your device, and when information may leave your device. The publisher of Swipick is **[DEVELOPER NAME]**. For privacy questions, contact **[PUBLIC SUPPORT EMAIL]**.
+Swipick is a photo and video review app. This policy explains what the app reads, what it keeps on your device, and when information may leave your device. The publisher of Swipick is **Jinjia Zheng**. For privacy questions, contact **mars121377@gmail.com**.
 
 ## Photos access and processing
 
